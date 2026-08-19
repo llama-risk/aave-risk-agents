@@ -1,13 +1,12 @@
 [submodule "lib/forge-std"]
 	path = lib/forge-std
 	url = https://github.com/foundry-rs/forge-std
-[submodule "lib/chaos-agents"]
-	path = lib/chaos-agents
-	url = https://github.com/ChaosLabsInc/chaos-agents
-
 [submodule "lib/aave-helpers"]
 	path = lib/aave-helpers
 	url = https://github.com/aave-dao/aave-helpers
 [submodule "lib/aave-price-feeds"]
 	path = lib/aave-price-feeds
 	url = https://github.com/aave-dao/aave-price-feeds
+[submodule "lib/aave-agent-hub"]
+	path = lib/aave-agent-hub
+	url = https://github.com/aave-dao/aave-agent-hub

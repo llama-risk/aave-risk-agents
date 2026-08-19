@@ -1,6 +1,6 @@
 # Aave Risk Agents
 
-Aave-specific agent contracts for automated risk parameter updates via the [Chaos Agents](https://github.com/ChaosLabsInc/chaos-agents) middleware.
+Aave-specific agent contracts for automated risk parameter updates via the [Aave Agent Hub](https://github.com/aave-dao/aave-agent-hub) middleware.
 
 ## About
 
@@ -15,7 +15,7 @@ The agents require `RISK_ADMIN` role granted by Aave governance and are controll
 The system operates through three components:
 
 - **Chaos Risk Oracle** publishes automated risk parameter updates (caps, rates, ltv etc.) on-chain.
-- **Chaos Agents middleware** pulls oracle payloads, runs protocol checks, forwards to agents.
+- **Aave Agent Hub middleware** pulls oracle payloads, runs protocol checks, forwards to agents.
 - **Aave Risk Agents** validate payloads against Aave rules, execute protocol state changes.
 
 ## Contracts
@@ -59,7 +59,7 @@ forge test
 
 ## Related documentation
 
-- [Chaos Agents middleware](https://github.com/ChaosLabsInc/chaos-agents)
+- [Aave Agent Hub middleware](https://github.com/aave-dao/aave-agent-hub)
 
 ## License
 
