@@ -4,7 +4,15 @@ pragma solidity ^0.8.27;
 import {IHub} from '../../../../src/contracts/dependencies/v4/IHub.sol';
 import {HubMock} from './AaveV4Mocks.sol';
 
-contract RatesHubMock is HubMock {
+contract AuthorityHubMock is HubMock {
+  address public authority;
+
+  function setAuthority(address authority_) external {
+    authority = authority_;
+  }
+}
+
+contract RatesHubMock is AuthorityHubMock {
   mapping(uint256 => address) internal _irStrategies;
 
   function setIrStrategy(uint256 assetId, address irStrategy) external {
@@ -16,7 +24,7 @@ contract RatesHubMock is HubMock {
   }
 }
 
-contract DirtyAssetConfigHubMock is HubMock {
+contract DirtyAssetConfigHubMock is AuthorityHubMock {
   function getAssetConfig(uint256) external pure returns (uint256, uint256, uint256, uint256) {
     return (0, 0, type(uint256).max, 0);
   }

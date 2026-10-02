@@ -4,6 +4,8 @@ pragma solidity ^0.8.27;
 import {IRangeValidationModule} from 'chaos-agents/src/interfaces/IRangeValidationModule.sol';
 import {IRiskOracle} from 'chaos-agents/src/contracts/dependencies/IRiskOracle.sol';
 
+import {IAccessManaged} from '../../dependencies/v4/IAccessManaged.sol';
+import {IAccessManager} from '../../dependencies/v4/IAccessManager.sol';
 import {IAssetInterestRateStrategy} from '../../dependencies/v4/IAssetInterestRateStrategy.sol';
 import {IHub} from '../../dependencies/v4/IHub.sol';
 import {IHubConfigurator} from '../../dependencies/v4/IHubConfigurator.sol';
@@ -107,7 +109,7 @@ contract AaveV4RatesAgent is BaseAaveV4Agent {
     bytes calldata value
   ) internal view returns (bool, uint256[4] memory current, uint256[4] memory next) {
     (bool ok, uint256 assetId) = _assetId(market.hub, market.asset);
-    if (!ok) return (false, current, next);
+    if (!ok || !_hubAllowsConfigurator(market.hub)) return (false, current, next);
 
     (ok, next) = _decodeRates(value);
     if (!ok) return (false, current, next);
@@ -162,6 +164,21 @@ contract AaveV4RatesAgent is BaseAaveV4Agent {
     );
     uint256 maxDrawnRate = rates[1] + rates[2] + rates[3];
     return ok && maxDrawnRate <= bound && maxDrawnRate <= type(uint32).max;
+  }
+
+  function _hubAllowsConfigurator(address hub) internal view returns (bool ok) {
+    uint256 authority;
+    (ok, authority) = _call1(hub, abi.encodeCall(IAccessManaged.authority, ()));
+    if (!ok || authority >> 160 != 0) return false;
+
+    bytes memory data = abi.encodeCall(
+      IAccessManager.canCall,
+      (CONFIGURATOR, hub, IHub.setInterestRateData.selector)
+    );
+    assembly ('memory-safe') {
+      ok := staticcall(gas(), authority, add(data, 0x20), mload(data), 0x00, 0x40)
+      ok := and(and(ok, eq(returndatasize(), 0x40)), and(eq(mload(0x00), 1), iszero(mload(0x20))))
+    }
   }
 
   function _call1(address target, bytes memory data) private view returns (bool ok, uint256 word) {

@@ -8,8 +8,9 @@ import {BaseAgentTest} from 'chaos-agents/tests/agent/BaseAgentTest.sol';
 
 import {AaveV4RatesAgent} from '../../../src/contracts/agent/v4/AaveV4RatesAgent.sol';
 import {BaseAaveV4Agent} from '../../../src/contracts/agent/v4/BaseAaveV4Agent.sol';
+import {IHub} from '../../../src/contracts/dependencies/v4/IHub.sol';
 import {IHubConfigurator} from '../../../src/contracts/dependencies/v4/IHubConfigurator.sol';
-import {AccessManagerMock, HubConfiguratorMock, RevertingHubMock, ShortReturnHubMock} from './mocks/AaveV4Mocks.sol';
+import {AccessManagerMock, HubConfiguratorMock, LongReturnHubMock, RevertingHubMock, ShortReturnHubMock} from './mocks/AaveV4Mocks.sol';
 import {RatesHubMock, DirtyAssetConfigHubMock, InterestRateStrategyMock, NoBoundsStrategyMock} from './mocks/AaveV4RatesMocks.sol';
 
 contract AaveV4RatesAgent_Test is BaseAgentTest('RateStrategyUpdate') {
@@ -25,6 +26,7 @@ contract AaveV4RatesAgent_Test is BaseAgentTest('RateStrategyUpdate') {
   address internal constant SPOKE = address(0x5B0CE);
   uint256 internal constant ASSET_ID = 3;
   bytes4 internal constant SELECTOR = IHubConfigurator.updateInterestRateData.selector;
+  bytes4 internal constant HUB_SELECTOR = IHub.setInterestRateData.selector;
 
   address internal _market;
 
@@ -36,6 +38,8 @@ contract AaveV4RatesAgent_Test is BaseAgentTest('RateStrategyUpdate') {
     _strategy = new InterestRateStrategyMock();
 
     _hub.listAsset(ASSET, ASSET_ID);
+    _hub.setAuthority(address(_accessManager));
+    _accessManager.setCanCall(address(_configurator), address(_hub), HUB_SELECTOR, true, 0);
     _hub.setIrStrategy(ASSET_ID, address(_strategy));
     _strategy.setInterestRateData(ASSET_ID, [uint256(80_00), 0, 4_00, 60_00]);
 
@@ -202,6 +206,8 @@ contract AaveV4RatesAgent_Test is BaseAgentTest('RateStrategyUpdate') {
       address(new DirtyAssetConfigHubMock())
     ];
     DirtyAssetConfigHubMock(hubs[2]).listAsset(ASSET, ASSET_ID);
+    DirtyAssetConfigHubMock(hubs[2]).setAuthority(address(_accessManager));
+    _accessManager.setCanCall(address(_configurator), hubs[2], HUB_SELECTOR, true, 0);
     for (uint256 i = 0; i < hubs.length; i++) {
       address market = _ratesAgent.marketId(hubs[i], address(0), ASSET);
       bytes memory data = abi.encode(hubs[i], address(0), ASSET, _rates(83_00, 0, 4_00, 60_00));
@@ -215,6 +221,27 @@ contract AaveV4RatesAgent_Test is BaseAgentTest('RateStrategyUpdate') {
     assertFalse(_validate(rates));
     _accessManager.setCanCall(address(_ratesAgent), address(_configurator), SELECTOR, false, 0);
     assertFalse(_validate(rates));
+  }
+
+  function test_validate_configuratorCannotCallHub() public {
+    bytes memory rates = _rates(83_00, 0, 4_00, 60_00);
+    assertTrue(_validate(rates));
+    _accessManager.setCanCall(address(_configurator), address(_hub), HUB_SELECTOR, true, 1);
+    assertFalse(_validate(rates));
+    _accessManager.setCanCall(address(_configurator), address(_hub), HUB_SELECTOR, false, 0);
+    assertFalse(_validate(rates));
+
+    _accessManager.setCanCall(address(_configurator), address(_hub), HUB_SELECTOR, true, 0);
+    address[4] memory authorities = [
+      address(0),
+      address(new RevertingHubMock()),
+      address(new ShortReturnHubMock()),
+      address(new LongReturnHubMock())
+    ];
+    for (uint256 i = 0; i < authorities.length; i++) {
+      _hub.setAuthority(authorities[i]);
+      assertFalse(_validate(rates));
+    }
   }
 
   function test_validate_neverReverts(uint256 a, uint256 b, uint256 c, uint256 d) public view {

@@ -10,6 +10,18 @@ import {IHubConfigurator} from '../../../src/contracts/dependencies/v4/IHubConfi
 import {IAssetInterestRateStrategy} from '../../../src/contracts/dependencies/v4/IAssetInterestRateStrategy.sol';
 import {AaveV4ForkTestBase} from './AaveV4ForkTestBase.sol';
 
+interface IAccessManagerAdmin {
+  function getRoleMember(uint64 roleId, uint256 index) external view returns (address);
+
+  function setTargetClosed(address target, bool closed) external;
+
+  function setTargetFunctionRole(
+    address target,
+    bytes4[] calldata selectors,
+    uint64 roleId
+  ) external;
+}
+
 library AaveV4EthereumFork {
   uint256 internal constant BLOCK = 26100000;
   address internal constant ACCESS_MANAGER = 0x08aE3BE30958cDd1847ec58fFfd4C451a87fDF01;
@@ -180,6 +192,46 @@ contract AaveV4RatesAgent_EthereumForkTest is AaveV4ForkTestBase('RateStrategyUp
       IHubConfigurator.updateInterestRateData.selector,
       _agent
     );
+
+    (bool shouldRun, ) = _check();
+    assertFalse(shouldRun);
+  }
+
+  function test_execute_skipsHubWithRemappedRole() public {
+    IAssetInterestRateStrategy.InterestRateData memory core = _current(CORE_HUB, USDC);
+    IAssetInterestRateStrategy.InterestRateData memory prime = _current(PRIME_HUB, USDC);
+    core.baseDrawnRate += 25;
+    prime.baseDrawnRate += 25;
+    _publish(CORE_HUB, address(0), USDC, abi.encode(core));
+    _publish(PRIME_HUB, address(0), USDC, abi.encode(prime));
+    bytes4[] memory selectors = new bytes4[](1);
+    selectors[0] = IHub.setInterestRateData.selector;
+    IAccessManagerAdmin accessManager = IAccessManagerAdmin(AaveV4EthereumFork.ACCESS_MANAGER);
+    vm.prank(accessManager.getRoleMember(0, 0));
+    accessManager.setTargetFunctionRole(CORE_HUB, selectors, 999);
+
+    (bool shouldRun, IAgentHub.ActionData[] memory actions) = _check();
+    assertTrue(shouldRun);
+    assertEq(actions[0].markets.length, 1);
+    assertEq(actions[0].markets[0], _marketId(PRIME_HUB, address(0), USDC));
+
+    address[] memory markets = new address[](2);
+    markets[0] = _marketId(CORE_HUB, address(0), USDC);
+    markets[1] = actions[0].markets[0];
+    actions[0].markets = markets;
+    _agentHub.execute(actions);
+    assertEq(abi.encode(_current(PRIME_HUB, USDC)), abi.encode(prime));
+    assertEq(_current(CORE_HUB, USDC).baseDrawnRate, core.baseDrawnRate - 25);
+  }
+
+  function test_check_skipsClosedHub() public {
+    IAssetInterestRateStrategy.InterestRateData memory data = _current(PRIME_HUB, USDC);
+    data.baseDrawnRate += 25;
+    _publish(PRIME_HUB, address(0), USDC, abi.encode(data));
+
+    IAccessManagerAdmin accessManager = IAccessManagerAdmin(AaveV4EthereumFork.ACCESS_MANAGER);
+    vm.prank(accessManager.getRoleMember(0, 0));
+    accessManager.setTargetClosed(PRIME_HUB, true);
 
     (bool shouldRun, ) = _check();
     assertFalse(shouldRun);
