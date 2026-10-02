@@ -70,7 +70,7 @@ abstract contract BaseAaveV4AdapterAgent is BaseAaveV4Agent {
   }
 
   function _adapter(uint256 agentId, Market memory market) internal view returns (address) {
-    if (!_isHub(market.hub)) return address(0);
+    if (!_contains(_hubs, market.hub)) return address(0);
 
     (bool ok, , uint256 reserveId) = _reserveId(market.hub, market.spoke, market.asset);
     if (!ok) return address(0);
@@ -102,13 +102,6 @@ abstract contract BaseAaveV4AdapterAgent is BaseAaveV4Agent {
   function _writeAdapter(uint256 agentId, Market memory market) internal returns (address adapter) {
     adapter = _adapter(agentId, market);
     _lastAdapterUpdate[adapter] = block.timestamp;
-  }
-
-  function _isHub(address hub) internal view returns (bool) {
-    for (uint256 i = 0; i < _hubs.length; i++) {
-      if (_hubs[i] == hub) return true;
-    }
-    return false;
   }
 
   function _isV3Source(address asset, address adapter) internal view returns (bool) {
