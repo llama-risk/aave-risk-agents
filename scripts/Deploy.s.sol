@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-import {EthereumScript, PolygonScript, BNBScript, GnosisScript, ArbitrumScript, OptimismScript, PlasmaScript, LineaScript, BaseScript, AvalancheScript} from 'solidity-utils/contracts/utils/ScriptUtils.sol';
+import {EthereumScript, PolygonScript, BNBScript, GnosisScript, ArbitrumScript, OptimismScript, PlasmaScript, LineaScript, BaseScript, AvalancheScript, MonadScript} from 'solidity-utils/contracts/utils/ScriptUtils.sol';
 import {MiscEthereum} from 'aave-address-book/MiscEthereum.sol';
 import {AaveV3Ethereum} from 'aave-address-book/AaveV3Ethereum.sol';
 import {AaveV3EthereumLido} from 'aave-address-book/AaveV3EthereumLido.sol';
@@ -23,6 +23,7 @@ import {MiscBase} from 'aave-address-book/MiscBase.sol';
 import {AaveV3Base} from 'aave-address-book/AaveV3Base.sol';
 import {MiscAvalanche} from 'aave-address-book/MiscAvalanche.sol';
 import {AaveV3Avalanche} from 'aave-address-book/AaveV3Avalanche.sol';
+import {AaveV3Monad} from 'aave-address-book/AaveV3Monad.sol';
 
 import {DeploySupplyCapAgent} from './AaveSupplyCapAgent.s.sol';
 import {DeployBorrowCapAgent} from './AaveBorrowCapAgent.s.sol';
@@ -217,6 +218,32 @@ contract DeployLinea is LineaScript {
       MiscLinea.RANGE_VALIDATION_MODULE,
       '',
       address(AaveV3Linea.POOL)
+    );
+  }
+}
+
+// AGENT_HUB and RANGE_VALIDATION_MODULE are not in aave-address-book yet.
+// Source: aave-agent-hub scripts/Deploy.s.sol:DeployMonad (CREATE2, check after deploy).
+library MonadAgentHub {
+  address internal constant AGENT_HUB = 0xa1Cf1e3D3fC743c0fd0e38f631A843372b7169DB;
+  address internal constant RANGE_VALIDATION_MODULE = 0x863D5B3f24E6b84564432dd20606a82bB1C61dC5;
+}
+
+// make deploy-ledger contract=scripts/Deploy.s.sol:DeployMonad chain=monad
+contract DeployMonad is MonadScript {
+  function run() external broadcast {
+    DeployDiscountRateAgent.deploy(
+      MonadAgentHub.AGENT_HUB,
+      MonadAgentHub.RANGE_VALIDATION_MODULE,
+      '',
+      address(AaveV3Monad.POOL),
+      address(AaveV3Monad.ORACLE)
+    );
+    DeployEModeAgent.deploy(
+      MonadAgentHub.AGENT_HUB,
+      MonadAgentHub.RANGE_VALIDATION_MODULE,
+      '',
+      address(AaveV3Monad.POOL)
     );
   }
 }
