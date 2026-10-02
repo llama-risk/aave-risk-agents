@@ -191,6 +191,15 @@ contract AaveV4FreezeAgent_Test is BaseAgentTest('FreezeUpdate_MAG7') {
     assertFalse(_validate(1));
   }
 
+  function test_validate_freezeOnlyNeedsBothRoles() public {
+    _spoke.setDynamicConfig(RESERVE_ID, KEY, _config(0, 105_00, 10_00));
+    _accessManager.setCanCall(address(_freezeAgent), address(_configurator), ADD_CF, false, 0);
+    assertFalse(_validate(2));
+
+    _accessManager.setCanCall(address(_freezeAgent), address(_configurator), ADD_CF, true, 0);
+    assertTrue(_validate(2));
+  }
+
   function test_validate_configuratorSpokeRoles() public {
     _accessManager.setCanCall(address(_configurator), address(_spoke), SPOKE_UPDATE, false, 0);
     assertTrue(_validate(1));
