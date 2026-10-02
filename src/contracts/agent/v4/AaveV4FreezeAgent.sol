@@ -3,8 +3,6 @@ pragma solidity ^0.8.27;
 
 import {IRiskOracle} from 'chaos-agents/src/contracts/dependencies/IRiskOracle.sol';
 
-import {IAccessManaged} from '../../dependencies/v4/IAccessManaged.sol';
-import {IAccessManager} from '../../dependencies/v4/IAccessManager.sol';
 import {ISpoke} from '../../dependencies/v4/ISpoke.sol';
 import {ISpokeConfigurator} from '../../dependencies/v4/ISpokeConfigurator.sol';
 import {BaseAaveV4Agent} from './BaseAaveV4Agent.sol';
@@ -90,15 +88,17 @@ contract AaveV4FreezeAgent is BaseAaveV4Agent {
     (ok, , actions.reserveId) = _reserveId(market.hub, market.spoke, market.asset);
     if (!ok) return (false, actions);
 
-    ISpoke spoke = ISpoke(market.spoke);
-    uint32 latestKey = spoke.getReserve(actions.reserveId).dynamicConfigKey;
-    ISpoke.DynamicReserveConfig memory latest = spoke.getDynamicReserveConfig(
-      actions.reserveId,
-      latestKey
-    );
+    uint32 latestKey;
+    ISpoke.DynamicReserveConfig memory latest;
+    (ok, latestKey, latest) = _latestDynamicReserveConfig(market.spoke, actions.reserveId);
+    if (!ok) return (false, actions);
+
+    ISpoke.ReserveConfig memory config;
+    (ok, config) = _reserveConfig(market.spoke, actions.reserveId);
+    if (!ok) return (false, actions);
 
     actions.addZeroCollateralFactor = latest.collateralFactor != 0;
-    actions.freeze = level == LEVEL_FREEZE && !spoke.getReserveConfig(actions.reserveId).frozen;
+    actions.freeze = level == LEVEL_FREEZE && !config.frozen;
     if (!actions.addZeroCollateralFactor && !actions.freeze) return (false, actions);
 
     // addCollateralFactor copies the latest key, so the copy must pass the spoke add checks.
@@ -111,34 +111,14 @@ contract AaveV4FreezeAgent is BaseAaveV4Agent {
 
     if (
       actions.addZeroCollateralFactor &&
-      !_configuratorCanCallSpoke(market.spoke, ISpoke.addDynamicReserveConfig.selector)
+      !_configuratorCanCall(market.spoke, ISpoke.addDynamicReserveConfig.selector)
     ) return (false, actions);
 
     if (
       actions.freeze &&
       (!_canCallConfigurator(ISpokeConfigurator.freezeReserve.selector) ||
-        !_configuratorCanCallSpoke(market.spoke, ISpoke.updateReserveConfig.selector))
+        !_configuratorCanCall(market.spoke, ISpoke.updateReserveConfig.selector))
     ) return (false, actions);
     return (true, actions);
-  }
-
-  function _configuratorCanCallSpoke(
-    address spoke,
-    bytes4 selector
-  ) internal view returns (bool ok) {
-    bytes memory data = abi.encodeCall(IAccessManaged.authority, ());
-    uint256 authority;
-    assembly ('memory-safe') {
-      ok := staticcall(gas(), spoke, add(data, 0x20), mload(data), 0x00, 0x20)
-      ok := and(ok, eq(returndatasize(), 0x20))
-      authority := mload(0x00)
-    }
-    if (!ok || authority >> 160 != 0) return false;
-
-    data = abi.encodeCall(IAccessManager.canCall, (CONFIGURATOR, spoke, selector));
-    assembly ('memory-safe') {
-      ok := staticcall(gas(), authority, add(data, 0x20), mload(data), 0x00, 0x40)
-      ok := and(and(ok, eq(returndatasize(), 0x40)), and(eq(mload(0x00), 1), iszero(mload(0x20))))
-    }
   }
 }

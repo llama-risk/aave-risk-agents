@@ -6,15 +6,13 @@ import {ConfiguratorMock, SpokeMock} from './AaveV4Mocks.sol';
 
 contract FreezeSpokeMock is SpokeMock {
   address public authority;
-  mapping(uint256 => uint32) internal _latestKeys;
-  mapping(uint256 => mapping(uint32 => ISpoke.DynamicReserveConfig)) internal _dynamicConfigs;
 
   function setDynamicConfig(
     uint256 reserveId,
     uint32 key,
     ISpoke.DynamicReserveConfig memory config
   ) external {
-    _latestKeys[reserveId] = key;
+    _reserveData[reserveId].dynamicConfigKey = key;
     _dynamicConfigs[reserveId][key] = config;
   }
 
@@ -26,22 +24,11 @@ contract FreezeSpokeMock is SpokeMock {
     _configs[reserveId].frozen = frozen;
   }
 
-  function getReserve(uint256 reserveId) external view returns (ISpoke.Reserve memory reserve) {
-    reserve.dynamicConfigKey = _latestKeys[reserveId];
-  }
-
-  function getDynamicReserveConfig(
-    uint256 reserveId,
-    uint32 key
-  ) external view returns (ISpoke.DynamicReserveConfig memory) {
-    return _dynamicConfigs[reserveId][key];
-  }
-
   function addDynamicReserveConfig(
     uint256 reserveId,
     ISpoke.DynamicReserveConfig memory config
   ) external returns (uint32) {
-    uint32 key = _latestKeys[reserveId];
+    uint32 key = _reserveData[reserveId].dynamicConfigKey;
     require(key < type(uint32).max, 'MaximumDynamicConfigKeyReached');
     require(
       config.collateralFactor < 100_00 &&
@@ -51,7 +38,7 @@ contract FreezeSpokeMock is SpokeMock {
       'InvalidCollateralFactorAndMaxLiquidationBonus'
     );
     require(config.liquidationFee <= 100_00, 'InvalidLiquidationFee');
-    _latestKeys[reserveId] = ++key;
+    _reserveData[reserveId].dynamicConfigKey = ++key;
     _dynamicConfigs[reserveId][key] = config;
     return key;
   }

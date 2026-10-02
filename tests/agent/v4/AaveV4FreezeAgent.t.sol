@@ -224,6 +224,29 @@ contract AaveV4FreezeAgent_Test is BaseAgentTest('FreezeUpdate_MAG7') {
     assertFalse(_validate(1));
   }
 
+  function test_validate_spokeReadsFailClosed() public {
+    vm.mockCallRevert(address(_spoke), abi.encodeCall(ISpoke.getReserve, (RESERVE_ID)), 'reverted');
+    assertFalse(_validate(1));
+    vm.clearMockedCalls();
+
+    vm.mockCall(
+      address(_spoke),
+      abi.encodeCall(ISpoke.getDynamicReserveConfig, (RESERVE_ID, KEY)),
+      abi.encode(uint256(1) << 16, 105_00, 10_00)
+    );
+    assertFalse(_validate(1));
+    vm.clearMockedCalls();
+
+    vm.mockCall(
+      address(_spoke),
+      abi.encodeCall(ISpoke.getReserveConfig, (RESERVE_ID)),
+      abi.encode(0, false, 2, false, false)
+    );
+    assertFalse(_validate(2));
+    vm.clearMockedCalls();
+    assertTrue(_validate(2));
+  }
+
   function test_inject_ltv0() public {
     _inject(1);
     ISpoke.DynamicReserveConfig memory latest = _latest();
