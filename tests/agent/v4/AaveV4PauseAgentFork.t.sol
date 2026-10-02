@@ -9,7 +9,7 @@ import {IHub} from '../../../src/contracts/dependencies/v4/IHub.sol';
 import {ISpoke} from '../../../src/contracts/dependencies/v4/ISpoke.sol';
 import {ISpokeConfigurator} from '../../../src/contracts/dependencies/v4/ISpokeConfigurator.sol';
 import {AaveV4ForkTestBase, AaveV4BaseFork} from './AaveV4ForkTestBase.sol';
-import {B20TokenMock} from './mocks/AaveV4PauseMocks.sol';
+import {B20TokenMock, BoundedPriceAdapterMock} from './mocks/AaveV4PauseMocks.sol';
 
 interface IB20OracleRegistryAdmin {
   function PAUSER_ROLE() external view returns (bytes32);
@@ -29,12 +29,6 @@ interface ISpokeSupply {
     uint256 debtToCover,
     bool receiveShares
   ) external;
-}
-
-interface IAccessManagerAdmin {
-  function getRoleMember(uint64 roleId, uint256 index) external view returns (address);
-
-  function setTargetClosed(address target, bool closed) external;
 }
 
 contract AaveV4PauseAgent_BaseForkTest is AaveV4ForkTestBase('ReservePause') {
@@ -142,9 +136,14 @@ contract AaveV4PauseAgent_BaseForkTest is AaveV4ForkTestBase('ReservePause') {
 
   function test_poke_pausesOnIssuerFlag() public {
     _etchB20(AAPLc);
-    _pauseAgent.setPokeEnabled(HUB, SPOKE, AAPLc, true);
+    _pauseAgent.setIssuerPokeEnabled(HUB, SPOKE, AAPLc, true);
 
-    vm.expectRevert(abi.encodeWithSelector(AaveV4PauseAgent.IssuerNotPaused.selector, AAPLc));
+    vm.expectRevert(
+      abi.encodeWithSelector(
+        AaveV4PauseAgent.PokeConditionNotMet.selector,
+        _marketId(HUB, SPOKE, AAPLc)
+      )
+    );
     _pauseAgent.poke(HUB, SPOKE, AAPLc);
 
     vm.prank(ISSUER_PAUSER);
@@ -177,7 +176,7 @@ contract AaveV4PauseAgent_BaseForkTest is AaveV4ForkTestBase('ReservePause') {
 
   function test_poke_revertsWithoutRole() public {
     _etchB20(AAPLc);
-    _pauseAgent.setPokeEnabled(HUB, SPOKE, AAPLc, true);
+    _pauseAgent.setIssuerPokeEnabled(HUB, SPOKE, AAPLc, true);
     vm.prank(ISSUER_PAUSER);
     IB20OracleRegistryAdmin(ISSUER_REGISTRY).setOraclePaused(AAPLc, true);
     _revokeRole(
@@ -212,7 +211,7 @@ contract AaveV4PauseAgent_BaseForkTest is AaveV4ForkTestBase('ReservePause') {
   function test_staleUpdateDoesNotRepauseAfterGovernanceUnpause() public {
     uint256 reserveId = _reserveIdOf(AAPLc);
     _etchB20(AAPLc);
-    _pauseAgent.setPokeEnabled(HUB, SPOKE, AAPLc, true);
+    _pauseAgent.setIssuerPokeEnabled(HUB, SPOKE, AAPLc, true);
 
     _publish(HUB, SPOKE, AAPLc, abi.encode(uint256(1)));
     vm.warp(block.timestamp + 1 hours);
@@ -240,7 +239,7 @@ contract AaveV4PauseAgent_BaseForkTest is AaveV4ForkTestBase('ReservePause') {
 
   function test_poke_followsHubAllowedMarkets() public {
     _etchB20(AAPLc);
-    _pauseAgent.setPokeEnabled(HUB, SPOKE, AAPLc, true);
+    _pauseAgent.setIssuerPokeEnabled(HUB, SPOKE, AAPLc, true);
     vm.prank(ISSUER_PAUSER);
     IB20OracleRegistryAdmin(ISSUER_REGISTRY).setOraclePaused(AAPLc, true);
     address market = _marketId(HUB, SPOKE, AAPLc);
@@ -252,14 +251,73 @@ contract AaveV4PauseAgent_BaseForkTest is AaveV4ForkTestBase('ReservePause') {
   }
 
   function test_check_skipsWhenSpokeClosed() public {
-    IAccessManagerAdmin accessManager = IAccessManagerAdmin(AaveV4BaseFork.ACCESS_MANAGER);
-    vm.prank(accessManager.getRoleMember(0, 0));
-    accessManager.setTargetClosed(SPOKE, true);
+    _closeTarget(SPOKE);
 
     _publish(HUB, SPOKE, AAPLc, abi.encode(uint256(1)));
     _publish(HUB, SPOKE, NVDAc, abi.encode(uint256(1)));
     (bool shouldRun, ) = _check();
     assertFalse(shouldRun);
+  }
+
+  function test_poke_pausesOnAdapterBreach() public {
+    uint256 aapl = _reserveIdOf(AAPLc);
+    uint256 nvda = _reserveIdOf(NVDAc);
+    address market = _marketId(HUB, SPOKE, AAPLc);
+    BoundedPriceAdapterMock adapter = new BoundedPriceAdapterMock();
+    _pauseAgent.setPriceAdapter(HUB, SPOKE, AAPLc, address(adapter));
+    assertFalse(_pauseAgent.isIssuerPokeEnabled(market));
+
+    vm.expectRevert(abi.encodeWithSelector(AaveV4PauseAgent.PokeConditionNotMet.selector, market));
+    _pauseAgent.poke(HUB, SPOKE, AAPLc);
+
+    adapter.setBreached(true);
+    vm.expectEmit(address(_pauseAgent));
+    emit AaveV4PauseAgent.Poked(market, aapl, makeAddr('anyone'), false, true);
+    vm.prank(makeAddr('anyone'));
+    _pauseAgent.poke(HUB, SPOKE, AAPLc);
+    assertTrue(ISpoke(SPOKE).getReserveConfig(aapl).paused);
+    assertFalse(ISpoke(SPOKE).getReserveConfig(nvda).paused);
+
+    address user = makeAddr('user');
+    vm.setEvmVersion('cancun');
+    vm.expectRevert(bytes4(keccak256('ReservePaused()')));
+    ISpokeSupply(SPOKE).liquidationCall(aapl, nvda, user, 1, false);
+
+    vm.warp(block.timestamp + 2 days);
+    _publish(HUB, SPOKE, AAPLc, abi.encode(uint256(1)));
+    (bool shouldRun, ) = _check();
+    assertFalse(shouldRun);
+  }
+
+  function test_poke_adapterBreachSkipsUnsetMarkets() public {
+    BoundedPriceAdapterMock adapter = new BoundedPriceAdapterMock();
+    adapter.setBreached(true);
+    _pauseAgent.setPriceAdapter(HUB, SPOKE, AAPLc, address(adapter));
+
+    vm.expectRevert(
+      abi.encodeWithSelector(AaveV4PauseAgent.PokeDisabled.selector, _marketId(HUB, SPOKE, NVDAc))
+    );
+    _pauseAgent.poke(HUB, SPOKE, NVDAc);
+    assertFalse(ISpoke(SPOKE).getReserveConfig(_reserveIdOf(NVDAc)).paused);
+  }
+
+  function test_poke_adapterBreachWithIssuerFlagEnabled() public {
+    _etchB20(AAPLc);
+    _pauseAgent.setIssuerPokeEnabled(HUB, SPOKE, AAPLc, true);
+    BoundedPriceAdapterMock adapter = new BoundedPriceAdapterMock();
+    adapter.setBreached(true);
+    _pauseAgent.setPriceAdapter(HUB, SPOKE, AAPLc, address(adapter));
+
+    vm.expectEmit(address(_pauseAgent));
+    emit AaveV4PauseAgent.Poked(
+      _marketId(HUB, SPOKE, AAPLc),
+      _reserveIdOf(AAPLc),
+      address(this),
+      false,
+      true
+    );
+    _pauseAgent.poke(HUB, SPOKE, AAPLc);
+    assertTrue(ISpoke(SPOKE).getReserveConfig(_reserveIdOf(AAPLc)).paused);
   }
 
   function _etchB20(address token) internal {

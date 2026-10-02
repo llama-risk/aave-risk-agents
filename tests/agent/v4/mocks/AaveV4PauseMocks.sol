@@ -46,3 +46,11 @@ contract B20TokenMock {
     return 1e18;
   }
 }
+
+contract BoundedPriceAdapterMock {
+  bool public isBreached;
+
+  function setBreached(bool breached) external {
+    isBreached = breached;
+  }
+}
