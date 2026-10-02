@@ -272,6 +272,20 @@ abstract contract AaveV4DynamicConfigAgentTestBase is BaseAgentTest {
     _dynamicAgent.setMinLiveKey(_agentId, address(_hub), address(_spoke), OTHER_ASSET, 0);
   }
 
+  function test_setMinLiveKey_reserveReadFails() public {
+    bytes memory call = abi.encodeCall(ISpoke.getReserve, (RESERVE_ID));
+    vm.mockCallRevert(address(_spoke), call, '');
+    vm.expectRevert(AaveV4DynamicConfigAgent.InvalidKey.selector);
+    _setMinLiveKey(_agentId, 0);
+
+    vm.mockCall(address(_spoke), call, hex'01');
+    vm.expectRevert(AaveV4DynamicConfigAgent.InvalidKey.selector);
+    _setMinLiveKey(_agentId, 0);
+
+    vm.clearMockedCalls();
+    _setMinLiveKey(_agentId, 0);
+  }
+
   function test_validate_valid() public view {
     assertTrue(_validate(_validValue()));
   }

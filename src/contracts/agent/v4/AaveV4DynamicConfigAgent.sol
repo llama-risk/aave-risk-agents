@@ -147,9 +147,9 @@ contract AaveV4DynamicConfigAgent is BaseAaveV4Agent {
     bool isOwner = msg.sender == IOwnable(AGENT_HUB).owner();
     require(isOwner || _isAgentAdmin(agentId, msg.sender, market), Unauthorized(msg.sender));
     (bool listed, , uint256 reserveId) = _reserveId(hub, spoke, asset);
-    uint32 lastKey;
-    if (listed) (listed, lastKey) = _dynamicConfigKey(spoke, reserveId);
-    require(listed && key <= lastKey && (isOwner || key >= minLiveKey[market]), InvalidKey());
+    require(listed, InvalidKey());
+    (bool read, uint32 lastKey) = _dynamicConfigKey(spoke, reserveId);
+    require(read && key <= lastKey && (isOwner || key >= minLiveKey[market]), InvalidKey());
     minLiveKey[market] = key;
     emit MinLiveKeySet(market, key);
   }
