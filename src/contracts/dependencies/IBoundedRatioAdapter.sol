@@ -12,7 +12,7 @@ interface IBoundedRatioAdapter {
 
   function getLowerBound() external view returns (uint256 lowerBound, uint256 expiration);
 
-  function getMaxRatio() external view returns (uint256);
+  function getLowerBoundLimit() external view returns (uint256);
 }
 
 interface IACLManager {

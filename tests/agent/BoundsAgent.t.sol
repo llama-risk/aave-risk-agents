@@ -10,7 +10,7 @@ import {BaseAgentTest} from 'chaos-agents/tests/agent/BaseAgentTest.sol';
 
 import {BoundsAgent} from '../../src/contracts/agent/BoundsAgent.sol';
 import {IBoundedRatioAdapter} from './mocks/IBoundedRatioAdapterG.sol';
-import {BoundedRatioAdapterMock, MockRatioProvider, MockACLManager, MalformedAdapter} from './mocks/BoundsAgentMocks.sol';
+import {BoundedRatioAdapterMock, BoundedRatioAdapterLimitMock, MockRatioProvider, MockACLManager, MalformedAdapter} from './mocks/BoundsAgentMocks.sol';
 
 contract BoundsAgent_Test is BaseAgentTest('RatioLowerBoundUpdate') {
   uint48 internal constant AGENT_MAX_DURATION = 2 days;
@@ -69,23 +69,27 @@ contract BoundsAgent_Test is BaseAgentTest('RatioLowerBoundUpdate') {
   }
 
   function _deployAdapter(MockRatioProvider provider) internal returns (BoundedRatioAdapterMock) {
+    return new BoundedRatioAdapterMock(_adapterParams(provider));
+  }
+
+  function _adapterParams(
+    MockRatioProvider provider
+  ) internal view returns (IBoundedRatioAdapter.BoundedRatioAdapterParams memory) {
     return
-      new BoundedRatioAdapterMock(
-        IBoundedRatioAdapter.BoundedRatioAdapterParams({
-          aclManager: IACLManager(address(_aclManager)),
-          baseAggregatorAddress: address(0),
-          ratioProviderAddress: address(provider),
-          pairDescription: 'Bounded ratio',
-          ratioDecimals: 18,
-          minimumSnapshotDelay: 7 days,
-          maximumLowerBoundDuration: ADAPTER_MAX_DURATION,
-          priceCapParams: IPriceCapAdapter.PriceCapUpdateParams({
-            snapshotRatio: uint104(RATIO),
-            snapshotTimestamp: uint48(block.timestamp - 7 days),
-            maxYearlyRatioGrowthPercent: 10_00
-          })
+      IBoundedRatioAdapter.BoundedRatioAdapterParams({
+        aclManager: IACLManager(address(_aclManager)),
+        baseAggregatorAddress: address(0),
+        ratioProviderAddress: address(provider),
+        pairDescription: 'Bounded ratio',
+        ratioDecimals: 18,
+        minimumSnapshotDelay: 7 days,
+        maximumLowerBoundDuration: ADAPTER_MAX_DURATION,
+        priceCapParams: IPriceCapAdapter.PriceCapUpdateParams({
+          snapshotRatio: uint104(RATIO),
+          snapshotTimestamp: uint48(block.timestamp - 7 days),
+          maxYearlyRatioGrowthPercent: 10_00
         })
-      );
+      });
   }
 
   function _update(
@@ -224,13 +228,14 @@ contract BoundsAgent_Test is BaseAgentTest('RatioLowerBoundUpdate') {
     assertFalse(agent.validate(_agentId, _agentContext, update));
   }
 
-  function test_validate_lowerBoundNotBelowMaxRatio() public {
+  function test_validate_lowerBoundCappedByMaxRatio() public {
     _setDefaultRange(50_00);
     _ratioProvider.setAnswer(2e18);
     uint256 maxRatio = _adapter.getMaxRatio();
+    assertEq(_adapter.getLowerBoundLimit(), maxRatio);
 
-    assertFalse(_validate(maxRatio, block.timestamp + 1 days));
-    assertTrue(_validate(maxRatio - 1, block.timestamp + 1 days));
+    assertFalse(_validate(maxRatio + 1, block.timestamp + 1 days));
+    assertTrue(_validate(maxRatio, block.timestamp + 1 days));
   }
 
   function test_validate_lowerBoundAboveRatio() public {
@@ -258,13 +263,15 @@ contract BoundsAgent_Test is BaseAgentTest('RatioLowerBoundUpdate') {
     assertTrue(_validate(0.96e18, block.timestamp + 1 days));
   }
 
-  function test_injection_restoresPriceAfterExpiry() public {
+  function test_injection_floorsHeldPriceAfterExpiry() public {
     _ratioProvider.setReverts(true);
     vm.warp(block.timestamp + 1 days);
-    assertEq(_adapter.latestAnswer(), 0);
+    assertTrue(_adapter.isHeld());
+    assertEq(_adapter.latestAnswer(), int256(RATIO / 1e10));
 
     _update(SEED_LOWER_BOUND, block.timestamp + 1 days);
     assertTrue(_checkAndPerformAutomation(_agentId));
+    assertFalse(_adapter.isHeld());
     assertEq(_adapter.latestAnswer(), int256(SEED_LOWER_BOUND / 1e10));
   }
 
@@ -325,6 +332,42 @@ contract BoundsAgent_Test is BaseAgentTest('RatioLowerBoundUpdate') {
     if (expired) vm.warp(block.timestamp + 1 days);
 
     assertTrue(_validate(ratio, block.timestamp + 1 hours));
+  }
+
+  function test_validate_followsAdapterLimitOverride() public {
+    BoundedRatioAdapterLimitMock adapter = new BoundedRatioAdapterLimitMock(
+      _adapterParams(_ratioProvider)
+    );
+    _agentHub.addAllowedMarket(_agentId, address(adapter));
+    adapter.setLowerBoundLimit(1.05e18);
+    _setDefaultRange(10_00);
+
+    bytes memory value = abi.encode(1.05e18 + 1, block.timestamp + 1 days);
+    assertFalse(_agent.validate(_agentId, _agentContext, _update(address(adapter), value)));
+    value = abi.encode(1.1e18, block.timestamp + 1 days);
+    assertFalse(_agent.validate(_agentId, _agentContext, _update(address(adapter), value)));
+
+    _update(address(adapter), abi.encode(1.05e18, block.timestamp + 1 days));
+    assertTrue(_checkAndPerformAutomation(_agentId));
+    (uint256 lowerBound, ) = adapter.getLowerBound();
+    assertEq(lowerBound, 1.05e18);
+  }
+
+  function test_validate_invalidRatioWithoutStoredBoundStepsFromLimit() public {
+    MockRatioProvider provider = new MockRatioProvider(int256(RATIO));
+    BoundedRatioAdapterLimitMock adapter = new BoundedRatioAdapterLimitMock(
+      _adapterParams(provider)
+    );
+    _agentHub.addAllowedMarket(_agentId, address(adapter));
+    adapter.setLowerBoundLimit(1.1e18);
+    provider.setReverts(true);
+
+    bytes memory value = abi.encode(1.1e18, block.timestamp + 1 days);
+    assertTrue(_agent.validate(_agentId, _agentContext, _update(address(adapter), value)));
+    value = abi.encode(1.04e18, block.timestamp + 1 days);
+    assertFalse(_agent.validate(_agentId, _agentContext, _update(address(adapter), value)));
+    value = abi.encode(1.05e18, block.timestamp + 1 days);
+    assertTrue(_agent.validate(_agentId, _agentContext, _update(address(adapter), value)));
   }
 
   function test_validate_agentWithoutRole() public {

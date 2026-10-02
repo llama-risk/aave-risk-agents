@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.19;
 
-// Copied from llama-risk/aave-price-feeds feat/bounded-ratio-adapter @ 358a47c, imports adjusted.
+// Copied from llama-risk/aave-price-feeds feat/bounded-ratio-adapter @ b6d98ac, imports adjusted.
 import {IBoundedRatioAdapter, IPriceCapAdapter, ICLSynchronicityPriceAdapter, IACLManager, IChainlinkAggregator} from './IBoundedRatioAdapterG.sol';
 
 /**
@@ -62,6 +62,10 @@ abstract contract BoundedRatioAdapterBase is IBoundedRatioAdapter {
 
   uint48 private _lowerBoundExpiration;
 
+  uint104 private _lastGoodRatio;
+
+  uint48 private _lastGoodRatioTimestamp;
+
   /**
    * @param params parameters to create adapter
    */
@@ -120,12 +124,12 @@ abstract contract BoundedRatioAdapterBase is IBoundedRatioAdapter {
   }
 
   /// @inheritdoc IPriceCapAdapter
-  function getSnapshotRatio() external view returns (uint256) {
+  function getSnapshotRatio() public view returns (uint256) {
     return _snapshotRatio;
   }
 
   /// @inheritdoc IPriceCapAdapter
-  function getSnapshotTimestamp() external view returns (uint256) {
+  function getSnapshotTimestamp() public view returns (uint256) {
     return _snapshotTimestamp;
   }
 
@@ -155,6 +159,23 @@ abstract contract BoundedRatioAdapterBase is IBoundedRatioAdapter {
   }
 
   /// @inheritdoc IBoundedRatioAdapter
+  function getLowerBoundLimit() public view returns (uint256) {
+    uint256 limit = _getLowerBoundLimit(_getRawRatio());
+    uint256 maxRatio = getMaxRatio();
+    return limit > maxRatio ? maxRatio : limit;
+  }
+
+  /// @inheritdoc IBoundedRatioAdapter
+  function getLastGoodRatio() external view returns (uint256, uint256) {
+    return (_lastGoodRatio, _lastGoodRatioTimestamp);
+  }
+
+  /// @inheritdoc IBoundedRatioAdapter
+  function getLastGoodRatioAge() external view returns (uint256) {
+    return _lastGoodRatio == 0 ? type(uint256).max : block.timestamp - _lastGoodRatioTimestamp;
+  }
+
+  /// @inheritdoc IBoundedRatioAdapter
   function getMaxRatio() public view returns (uint256) {
     return
       _snapshotRatio +
@@ -163,15 +184,13 @@ abstract contract BoundedRatioAdapterBase is IBoundedRatioAdapter {
   }
 
   /// @inheritdoc IBoundedRatioAdapter
-  function getBoundedRatio() public view returns (uint256) {
-    uint256 ratio = _getRawRatio();
-    uint256 lowerBound = getActiveLowerBound();
-    if (ratio < lowerBound) {
-      ratio = lowerBound;
-    }
+  function getBoundedRatio() public view returns (uint256 ratio) {
+    (ratio, ) = _getBoundedRatio();
+  }
 
-    uint256 maxRatio = getMaxRatio();
-    return ratio > maxRatio ? maxRatio : ratio;
+  /// @inheritdoc IBoundedRatioAdapter
+  function isHeld() external view returns (bool held) {
+    (, held) = _getBoundedRatio();
   }
 
   /// @inheritdoc IPriceCapAdapter
@@ -184,32 +203,19 @@ abstract contract BoundedRatioAdapterBase is IBoundedRatioAdapter {
 
   /// @inheritdoc IBoundedRatioAdapter
   function isFloored() public view returns (bool) {
-    return _getRawRatio() < getActiveLowerBound();
+    uint256 ratio = _getRawRatio();
+    return ratio < _getMinRatio(ratio);
   }
 
   /// @inheritdoc IBoundedRatioAdapter
-  function isBreached() external view returns (bool) {
+  function isBreached() public view virtual returns (bool) {
     uint256 ratio = _getRawRatio();
-    return ratio == 0 || ratio < getActiveLowerBound() || ratio > getMaxRatio();
+    return ratio == 0 || ratio < _getMinRatio(ratio) || ratio > getMaxRatio();
   }
 
   /// @inheritdoc ICLSynchronicityPriceAdapter
-  function latestAnswer() public view returns (int256) {
-    uint256 ratio = getBoundedRatio();
-    if (ratio == 0) {
-      return 0;
-    }
-
-    uint256 basePrice = 1;
-    if (address(BASE_TO_USD_AGGREGATOR) != address(0)) {
-      basePrice = _getBasePrice();
-      if (basePrice == 0) {
-        return 0;
-      }
-    }
-
-    // forge-lint: disable-next-line(unsafe-typecast)
-    return int256((basePrice * ratio * _SCALE_UP) / _SCALE_DOWN);
+  function latestAnswer() public view returns (int256 answer) {
+    (answer, ) = _getAnswer();
   }
 
   /// @inheritdoc IBoundedRatioAdapter
@@ -224,16 +230,29 @@ abstract contract BoundedRatioAdapterBase is IBoundedRatioAdapter {
       uint80 answeredInRound
     )
   {
-    answer = latestAnswer();
-    updatedAt = answer > 0 ? _getUpdatedAt() : 0;
+    bool held;
+    (answer, held) = _getAnswer();
+    if (answer > 0) {
+      updatedAt = _getUpdatedAt(held ? _lastGoodRatioTimestamp : _getRatioUpdatedAt());
+    }
     return (0, answer, updatedAt, updatedAt, 0);
+  }
+
+  /// @inheritdoc IBoundedRatioAdapter
+  function recordRatio() external returns (uint256 ratio) {
+    ratio = _recordRatio();
+    if (ratio == 0) {
+      revert NoValidRatio();
+    }
   }
 
   /// @inheritdoc IPriceCapAdapter
   function setCapParameters(PriceCapUpdateParams memory priceCapParams) external {
     _onlyRiskOrPoolAdmin();
 
+    _validateCapParameters(priceCapParams);
     _setCapParameters(priceCapParams);
+    _recordRatio();
   }
 
   /// @inheritdoc IBoundedRatioAdapter
@@ -246,14 +265,12 @@ abstract contract BoundedRatioAdapterBase is IBoundedRatioAdapter {
       revert InvalidLowerBoundExpiration(expiration);
     }
 
-    // without a valid ratio, only the last stored lower bound or a lower one can be set
-    uint256 limit = _getRawRatio();
-    if (limit == 0) {
-      limit = _lowerBound;
-    }
-    if (lowerBound > limit || lowerBound > getMaxRatio()) {
+    if (lowerBound > getLowerBoundLimit()) {
       revert InvalidLowerBound(lowerBound);
     }
+
+    // record against the previous bound, so a new bound cannot unfloor a breached ratio
+    _recordRatio();
 
     _lowerBound = lowerBound;
     _lowerBoundExpiration = expiration;
@@ -261,11 +278,94 @@ abstract contract BoundedRatioAdapterBase is IBoundedRatioAdapter {
     emit LowerBoundUpdated(lowerBound, expiration);
   }
 
-  /// @dev Timestamp of the latest ratio update
+  /// @dev Timestamp of the latest ratio update, must not revert
   function _getRatioUpdatedAt() internal view virtual returns (uint256);
 
-  function _getUpdatedAt() internal view virtual returns (uint256) {
+  /// @dev Lowest ratio used for the price, given the raw ratio (0 when invalid)
+  function _getMinRatio(uint256) internal view virtual returns (uint256) {
+    return getActiveLowerBound();
+  }
+
+  /// @dev Highest lower bound that can be set, given the raw ratio (0 when invalid); capped by the upper bound
+  function _getLowerBoundLimit(uint256 ratio) internal view virtual returns (uint256) {
+    return ratio == 0 ? _lowerBound : ratio;
+  }
+
+  /// @dev Extra checks on a cap update, run before the stored parameters change
+  function _validateCapParameters(PriceCapUpdateParams memory) internal view virtual {}
+
+  /// @dev Ratio used for the price, and whether it is the last good ratio
+  function _getBoundedRatio() internal view returns (uint256 ratio, bool held) {
+    ratio = _getRawRatio();
+    uint256 minRatio = _getMinRatio(ratio);
+    if (ratio < minRatio) {
+      ratio = minRatio;
+    }
+
+    if (ratio == 0) {
+      ratio = _lastGoodRatio;
+      held = ratio != 0;
+    }
+
+    uint256 maxRatio = getMaxRatio();
+    if (ratio > maxRatio) {
+      ratio = maxRatio;
+    }
+  }
+
+  function _getAnswer() internal view returns (int256, bool) {
+    (uint256 ratio, bool held) = _getBoundedRatio();
+    if (ratio == 0) {
+      return (0, held);
+    }
+
+    uint256 basePrice = 1;
+    if (address(BASE_TO_USD_AGGREGATOR) != address(0)) {
+      basePrice = _getBasePrice();
+      if (basePrice == 0) {
+        return (0, held);
+      }
+    }
+
+    // forge-lint: disable-next-line(unsafe-typecast)
+    return (int256((basePrice * ratio * _SCALE_UP) / _SCALE_DOWN), held);
+  }
+
+  /// @dev Stores the valid, non-floored raw ratio, capped by the upper bound, with the ratio source timestamp.
+  /// Skips (returns 0) when the ratio is invalid or floored, or its timestamp is older than the stored one
+  function _recordRatio() internal returns (uint256) {
+    uint256 ratio = _getRawRatio();
+    if (ratio == 0 || ratio < _getMinRatio(ratio)) {
+      return 0;
+    }
+
+    uint256 maxRatio = getMaxRatio();
+    if (ratio > maxRatio) {
+      ratio = maxRatio;
+    }
+    if (ratio > type(uint104).max) {
+      ratio = type(uint104).max;
+    }
+
     uint256 updatedAt = _getRatioUpdatedAt();
+    if (updatedAt == 0 || updatedAt > block.timestamp) {
+      updatedAt = block.timestamp;
+    }
+    if (updatedAt < _lastGoodRatioTimestamp) {
+      return 0;
+    }
+
+    // forge-lint: disable-next-line(unsafe-typecast)
+    _lastGoodRatio = uint104(ratio);
+    // forge-lint: disable-next-line(unsafe-typecast)
+    _lastGoodRatioTimestamp = uint48(updatedAt);
+
+    emit LastGoodRatioRecorded(ratio, updatedAt);
+    return ratio;
+  }
+
+  function _getUpdatedAt(uint256 ratioUpdatedAt) internal view returns (uint256) {
+    uint256 updatedAt = ratioUpdatedAt;
     if (address(BASE_TO_USD_AGGREGATOR) != address(0)) {
       uint256 baseUpdatedAt = _getBaseUpdatedAt();
       if (baseUpdatedAt < updatedAt) {

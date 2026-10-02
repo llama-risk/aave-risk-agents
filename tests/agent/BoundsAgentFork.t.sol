@@ -165,20 +165,22 @@ contract BoundsAgentFork_Test is Test {
     assertApproxEqRel(flooredPrice, (price * 99_50) / 100_00, 0.0001e18);
   }
 
-  function test_fork_restoresPriceAfterRatioFailure() public {
+  function test_fork_floorsHeldPriceAfterRatioFailure() public {
     (uint256 seededLowerBound, ) = _adapter.getLowerBound();
     vm.warp(block.timestamp + 1 days);
     vm.mockCallRevert(RATIO_PROVIDER, abi.encodeCall(IChainlinkAggregator.latestAnswer, ()), '');
-    assertEq(_adapter.latestAnswer(), 0);
+    assertTrue(_adapter.isHeld());
+    assertEq(_adapter.getBoundedRatio(), _ratio);
 
     assertFalse(_agent.validate(_agentId, '', _latest(seededLowerBound + 1)));
     _publish(seededLowerBound, block.timestamp + 1 days);
     assertTrue(_run());
+    assertFalse(_adapter.isHeld());
     assertEq(_adapter.getBoundedRatio(), seededLowerBound);
     assertGt(AaveV3Base.ORACLE.getAssetPrice(AaveV3BaseAssets.weETH_UNDERLYING), 0);
   }
 
-  function test_fork_restoresV4ReservePriceAfterRatioFailure() public {
+  function test_fork_floorsHeldV4ReservePriceAfterRatioFailure() public {
     vm.prank(V4_MAG7_SPOKE);
     V4_MAG7_SPOKE_ORACLE.setReserveSource(0, address(_adapter));
     assertGt(V4_MAG7_SPOKE_ORACLE.getReservePrice(0), 0);
@@ -186,8 +188,8 @@ contract BoundsAgentFork_Test is Test {
     (uint256 seededLowerBound, ) = _adapter.getLowerBound();
     vm.warp(block.timestamp + 1 days);
     vm.mockCallRevert(RATIO_PROVIDER, abi.encodeCall(IChainlinkAggregator.latestAnswer, ()), '');
-    vm.expectRevert();
-    V4_MAG7_SPOKE_ORACLE.getReservePrice(0);
+    uint256 heldPrice = V4_MAG7_SPOKE_ORACLE.getReservePrice(0);
+    assertEq(heldPrice, uint256(IChainlinkAggregator(address(_adapter)).latestAnswer()));
 
     _publish(seededLowerBound, block.timestamp + 1 days);
     assertTrue(_run());
@@ -195,7 +197,7 @@ contract BoundsAgentFork_Test is Test {
       V4_MAG7_SPOKE_ORACLE.getReservePrice(0),
       uint256(IChainlinkAggregator(address(_adapter)).latestAnswer())
     );
-    assertGt(V4_MAG7_SPOKE_ORACLE.getReservePrice(0), 0);
+    assertLt(V4_MAG7_SPOKE_ORACLE.getReservePrice(0), heldPrice);
   }
 
   function test_fork_lostRoleSkipsUpdate() public {

@@ -15,6 +15,20 @@ contract BoundedRatioAdapterMock is BoundedRatioAdapterBase {
   }
 }
 
+contract BoundedRatioAdapterLimitMock is BoundedRatioAdapterMock {
+  uint256 public lowerBoundLimit;
+
+  constructor(BoundedRatioAdapterParams memory params) BoundedRatioAdapterMock(params) {}
+
+  function setLowerBoundLimit(uint256 newLimit) external {
+    lowerBoundLimit = newLimit;
+  }
+
+  function _getLowerBoundLimit(uint256) internal view override returns (uint256) {
+    return lowerBoundLimit;
+  }
+}
+
 contract MockRatioProvider {
   int256 public answer;
   bool public reverts;

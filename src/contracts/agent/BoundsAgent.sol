@@ -14,8 +14,9 @@ import {IACLManager, IBoundedRatioAdapter} from '../dependencies/IBoundedRatioAd
  * @author LlamaRisk
  * @notice Agent that sets the lower bound of bounded ratio adapters. The update market is the
  *         adapter and the update value is abi.encode(uint256 lowerBound, uint256 expiration).
- *         The lower bound moves within the range validation config from the active lower bound,
- *         or from the ratio when no lower bound is active or the active one is above the ratio.
+ *         The lower bound must not exceed the adapter getLowerBoundLimit and moves within the range
+ *         validation config from the active lower bound, or from the ratio when no lower bound is
+ *         active or the active one is above the ratio.
  */
 contract BoundsAgent is BaseAgent {
   using Strings for string;
@@ -109,8 +110,12 @@ contract BoundsAgent is BaseAgent {
     );
     if (!ok || expiration - block.timestamp > value) return false;
 
-    (ok, value, ) = _read(adapter, abi.encodeCall(IBoundedRatioAdapter.getMaxRatio, ()), 0x20);
-    if (!ok || lowerBound >= value) return false;
+    (ok, value, ) = _read(
+      adapter,
+      abi.encodeCall(IBoundedRatioAdapter.getLowerBoundLimit, ()),
+      0x20
+    );
+    if (!ok || lowerBound > value) return false;
 
     uint256 storedLowerBound;
     uint256 storedExpiration;
@@ -119,15 +124,14 @@ contract BoundsAgent is BaseAgent {
       abi.encodeCall(IBoundedRatioAdapter.getLowerBound, ()),
       0x40
     );
-    uint256 ratio = _getRatio(adapter);
     if (
       !ok ||
       (lowerBound == storedLowerBound && expiration == storedExpiration) ||
-      lowerBound > (ratio == 0 ? storedLowerBound : ratio) ||
       !_isRiskOrPoolAdmin(adapter)
     ) {
       return false;
     }
+    value = _stepFrom(_getRatio(adapter), value, storedLowerBound, storedExpiration);
 
     return
       RANGE_VALIDATION_MODULE.validate(
@@ -135,20 +139,21 @@ contract BoundsAgent is BaseAgent {
         agentId,
         adapter,
         IRangeValidationModule.RangeValidationInput({
-          from: _stepFrom(ratio, storedLowerBound, storedExpiration),
+          from: value,
           to: lowerBound,
           updateType: LOWER_BOUND_RANGE_TYPE
         })
       );
   }
 
-  /// @dev without a valid ratio the step starts at the stored lower bound, as the adapter limit does
+  /// @dev without a valid ratio the step starts at the stored lower bound, or the adapter limit if none is stored
   function _stepFrom(
     uint256 ratio,
+    uint256 limit,
     uint256 storedLowerBound,
     uint256 storedExpiration
   ) internal view returns (uint256) {
-    if (ratio == 0) return storedLowerBound;
+    if (ratio == 0) return storedLowerBound == 0 ? limit : storedLowerBound;
     uint256 activeLowerBound = block.timestamp < storedExpiration ? storedLowerBound : 0;
     return activeLowerBound == 0 || activeLowerBound > ratio ? ratio : activeLowerBound;
   }
