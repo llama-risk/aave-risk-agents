@@ -7,6 +7,8 @@ import {IRiskOracle} from 'chaos-agents/src/contracts/dependencies/IRiskOracle.s
 import {ShortStrings, ShortString} from 'openzeppelin-contracts/contracts/utils/ShortStrings.sol';
 import {Strings} from 'openzeppelin-contracts/contracts/utils/Strings.sol';
 
+import {IAccessManaged} from '../../dependencies/v4/IAccessManaged.sol';
+import {IAccessManager} from '../../dependencies/v4/IAccessManager.sol';
 import {IHub} from '../../dependencies/v4/IHub.sol';
 import {ISpoke} from '../../dependencies/v4/ISpoke.sol';
 
@@ -15,7 +17,9 @@ import {ISpoke} from '../../dependencies/v4/ISpoke.sol';
  * @author LlamaRisk
  * @notice Base for agents that write Aave v4 parameters through a hub or spoke configurator.
  *         The update market is the market id of (hub, spoke, asset) and the update value is
- *         abi.encode(hub, spoke, asset, value). Hub-level parameters use spoke = address(0).
+ *         abi.encode(hub, spoke, asset, value). Hub-level parameters use spoke = address(0) and
+ *         override _isHubLevel. Updates are valid only if the agent can call the configurator
+ *         selector immediately.
  */
 abstract contract BaseAaveV4Agent is BaseAgent {
   using Strings for string;
@@ -41,7 +45,10 @@ abstract contract BaseAaveV4Agent is BaseAgent {
     string memory updateTypeSuffix,
     address configurator
   ) BaseAgent(agentHub) {
-    require(agentHub != address(0) && configurator != address(0), InvalidZeroAddress());
+    require(
+      agentHub != address(0) && rangeValidationModule != address(0) && configurator != address(0),
+      InvalidZeroAddress()
+    );
     CONFIGURATOR = configurator;
     RANGE_VALIDATION_MODULE = IRangeValidationModule(rangeValidationModule);
     UPDATE_TYPE = string.concat(updateType, updateTypeSuffix).toShortString();
@@ -93,7 +100,12 @@ abstract contract BaseAaveV4Agent is BaseAgent {
   ) internal view returns (bool, Market memory market, bytes calldata value) {
     bool decoded;
     (decoded, market, value) = _decodeUpdate(update);
-    if (!decoded || !update.updateType.equal(UPDATE_TYPE.toString())) {
+    if (
+      !decoded ||
+      (market.spoke == address(0)) != _isHubLevel() ||
+      !update.updateType.equal(UPDATE_TYPE.toString()) ||
+      !_canCallConfigurator(_configuratorSelector())
+    ) {
       return (false, market, value);
     }
     return (_validateUpdate(agentId, agentContext, update, market, value), market, value);
@@ -109,6 +121,12 @@ abstract contract BaseAaveV4Agent is BaseAgent {
     uint256 length = uint256(bytes32(data[128:160]));
     uint256 padded = data.length - 160;
     if (length > padded || padded - length > 31 || padded % 32 != 0) {
+      return (false, market, value);
+    }
+    if (
+      padded != length &&
+      uint256(bytes32(data[data.length - 32:])) << (8 * (32 - (padded - length))) != 0
+    ) {
       return (false, market, value);
     }
 
@@ -135,23 +153,64 @@ abstract contract BaseAaveV4Agent is BaseAgent {
     return _staticcallWord(hub, abi.encodeCall(IHub.getAssetId, (asset)));
   }
 
+  function _spokeAssetId(
+    address hub,
+    address spoke,
+    address asset
+  ) internal view returns (bool, uint256) {
+    (bool ok, uint256 assetId) = _assetId(hub, asset);
+    if (!ok) return (false, 0);
+
+    uint256 listed;
+    (ok, listed) = _staticcallWord(hub, abi.encodeCall(IHub.isSpokeListed, (assetId, spoke)));
+    if (!ok || listed != 1) return (false, 0);
+    return (true, assetId);
+  }
+
   function _reserveId(
     address hub,
     address spoke,
     address asset
   ) internal view returns (bool, uint256, uint256) {
-    (bool ok, uint256 assetId) = _assetId(hub, asset);
+    (bool ok, uint256 assetId) = _spokeAssetId(hub, spoke, asset);
     if (!ok) return (false, 0, 0);
-
-    uint256 listed;
-    (ok, listed) = _staticcallWord(hub, abi.encodeCall(IHub.isSpokeListed, (assetId, spoke)));
-    if (!ok || listed != 1) return (false, 0, 0);
 
     uint256 reserveId;
     (ok, reserveId) = _staticcallWord(spoke, abi.encodeCall(ISpoke.getReserveId, (hub, assetId)));
     if (!ok) return (false, 0, 0);
     return (true, assetId, reserveId);
   }
+
+  function _canCallConfigurator(bytes4 selector) internal view returns (bool) {
+    (bool ok, uint256 authority) = _staticcallWord(
+      CONFIGURATOR,
+      abi.encodeCall(IAccessManaged.authority, ())
+    );
+    if (!ok || authority >> 160 != 0) return false;
+
+    bytes memory data = abi.encodeCall(
+      IAccessManager.canCall,
+      (address(this), CONFIGURATOR, selector)
+    );
+    assembly ('memory-safe') {
+      ok := staticcall(gas(), authority, add(data, 0x20), mload(data), 0x00, 0x40)
+      ok := and(and(ok, eq(returndatasize(), 0x40)), and(eq(mload(0x00), 1), iszero(mload(0x20))))
+    }
+    return ok;
+  }
+
+  function _decodeUint(bytes calldata value, uint256 max) internal pure returns (bool, uint256) {
+    if (value.length != 32) return (false, 0);
+    uint256 decoded = uint256(bytes32(value));
+    if (decoded > max) return (false, 0);
+    return (true, decoded);
+  }
+
+  function _isHubLevel() internal pure virtual returns (bool) {
+    return false;
+  }
+
+  function _configuratorSelector() internal view virtual returns (bytes4);
 
   function _validateUpdate(
     uint256 agentId,

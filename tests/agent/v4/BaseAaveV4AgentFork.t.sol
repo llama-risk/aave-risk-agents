@@ -4,6 +4,7 @@ pragma solidity ^0.8.27;
 import {Test} from 'forge-std/Test.sol';
 import {IAgentHub} from 'chaos-agents/src/contracts/AgentHub.sol';
 import {IRangeValidationModule} from 'chaos-agents/src/interfaces/IRangeValidationModule.sol';
+import {RangeValidationModule} from 'chaos-agents/src/contracts/modules/RangeValidationModule.sol';
 
 import {IHub} from '../../../src/contracts/dependencies/v4/IHub.sol';
 import {ISpoke} from '../../../src/contracts/dependencies/v4/ISpoke.sol';
@@ -13,6 +14,7 @@ import {IAaveOracle} from '../../../src/contracts/dependencies/v4/IAaveOracle.so
 import {IAssetInterestRateStrategy} from '../../../src/contracts/dependencies/v4/IAssetInterestRateStrategy.sol';
 import {AaveV4ForkTestBase, AaveV4BaseFork} from './AaveV4ForkTestBase.sol';
 import {AaveV4AgentHarness} from './mocks/AaveV4AgentHarness.sol';
+import {AaveV4HubAgentHarness} from './mocks/AaveV4HubAgentHarness.sol';
 
 contract BaseAaveV4Agent_BaseForkTest is AaveV4ForkTestBase('CollateralRiskUpdate') {
   address internal constant HUB = AaveV4BaseFork.EQUITIES_HUB;
@@ -149,6 +151,38 @@ contract BaseAaveV4Agent_BaseForkTest is AaveV4ForkTestBase('CollateralRiskUpdat
     assertFalse(ok);
   }
 
+  function test_spokeAssetId_nonReserveSpokes() public view {
+    uint256 usdcId = IHub(HUB).getAssetId(AaveV4BaseFork.USDC);
+    address[2] memory spokes = [
+      AaveV4BaseFork.USDC_TOKENIZATION_SPOKE,
+      AaveV4BaseFork.TREASURY_SPOKE
+    ];
+    for (uint256 i = 0; i < spokes.length; i++) {
+      (bool ok, uint256 assetId) = _harness.spokeAssetId(HUB, spokes[i], AaveV4BaseFork.USDC);
+      assertTrue(ok);
+      assertEq(assetId, usdcId);
+      (ok, , ) = _harness.reserveId(HUB, spokes[i], AaveV4BaseFork.USDC);
+      assertFalse(ok);
+    }
+    assertGt(IHub(HUB).getSpokeConfig(usdcId, AaveV4BaseFork.USDC_TOKENIZATION_SPOKE).addCap, 0);
+    (bool listed, ) = _harness.spokeAssetId(HUB, SPOKE, address(0xdead));
+    assertFalse(listed);
+  }
+
+  function test_canCallConfigurator() public view {
+    assertTrue(_harness.canCallConfigurator(ISpokeConfigurator.updateCollateralRisk.selector));
+    assertFalse(_harness.canCallConfigurator(bytes4(0xdeadbeef)));
+  }
+
+  function test_grantRole_revertsOnUnmappedSelector() public {
+    vm.expectRevert(bytes('selector not mapped'));
+    this.grantRole(AaveV4BaseFork.SPOKE_CONFIGURATOR, bytes4(0xdeadbeef), address(1));
+  }
+
+  function grantRole(address target, bytes4 selector, address account) external {
+    _grantRole(target, selector, account);
+  }
+
   function test_checkAndExecute() public {
     uint256 reserveId = _reserveIdOf(AaveV4BaseFork.AAPLc);
     uint256 current = ISpoke(SPOKE).getReserveConfig(reserveId).collateralRisk;
@@ -202,7 +236,7 @@ contract BaseAaveV4Agent_BaseForkTest is AaveV4ForkTestBase('CollateralRiskUpdat
     assertEq(ISpoke(SPOKE).getReserveConfig(reserveId).collateralRisk, current + 1_00);
   }
 
-  function test_execute_revertsAfterRoleRevoked() public {
+  function test_check_skipsAfterRoleRevoked() public {
     uint256 current = ISpoke(SPOKE)
       .getReserveConfig(_reserveIdOf(AaveV4BaseFork.AAPLc))
       .collateralRisk;
@@ -213,10 +247,8 @@ contract BaseAaveV4Agent_BaseForkTest is AaveV4ForkTestBase('CollateralRiskUpdat
       _agent
     );
 
-    (bool shouldRun, IAgentHub.ActionData[] memory actions) = _check();
-    assertTrue(shouldRun);
-    vm.expectRevert(abi.encodeWithSignature('AccessManagedUnauthorized(address)', _agent));
-    _agentHub.execute(actions);
+    (bool shouldRun, ) = _check();
+    assertFalse(shouldRun);
   }
 
   function _reserveIdOf(address asset) internal view returns (uint256) {
@@ -236,7 +268,11 @@ contract BaseAaveV4Agent_EthereumForkTest is Test {
 
   function setUp() public {
     vm.createSelectFork(vm.rpcUrl('mainnet'), BLOCK);
-    _harness = new AaveV4AgentHarness(address(this), address(0), SPOKE_CONFIGURATOR);
+    _harness = new AaveV4AgentHarness(
+      address(this),
+      address(new RangeValidationModule()),
+      SPOKE_CONFIGURATOR
+    );
   }
 
   function test_sameUnderlyingOnTwoHubs() public view {
@@ -260,5 +296,55 @@ contract BaseAaveV4Agent_EthereumForkTest is Test {
       _harness.marketId(CORE_HUB, BLUECHIP_SPOKE, USDC) !=
         _harness.marketId(PRIME_HUB, BLUECHIP_SPOKE, USDC)
     );
+  }
+}
+
+contract BaseAaveV4Agent_HubLevelBaseForkTest is AaveV4ForkTestBase('RateUpdate') {
+  address internal constant HUB = AaveV4BaseFork.EQUITIES_HUB;
+  address internal constant USDC = AaveV4BaseFork.USDC;
+
+  function _deployAgent() internal override returns (address) {
+    return
+      address(
+        new AaveV4HubAgentHarness(
+          address(_agentHub),
+          address(_rangeValidationModule),
+          'RateUpdate',
+          AaveV4BaseFork.HUB_CONFIGURATOR
+        )
+      );
+  }
+
+  function _allowedMarkets() internal pure override returns (address[] memory markets) {
+    markets = new address[](2);
+    markets[0] = _marketId(HUB, address(0), USDC);
+    markets[1] = _marketId(HUB, AaveV4BaseFork.MAG7_SPOKE, USDC);
+  }
+
+  function _postSetup() internal override {
+    _grantRole(
+      AaveV4BaseFork.HUB_CONFIGURATOR,
+      IHubConfigurator.updateInterestRateData.selector,
+      _agent
+    );
+  }
+
+  function test_checkAndExecute() public {
+    uint256 assetId = IHub(HUB).getAssetId(USDC);
+    IAssetInterestRateStrategy strategy = IAssetInterestRateStrategy(
+      IHub(HUB).getAssetConfig(assetId).irStrategy
+    );
+    IAssetInterestRateStrategy.InterestRateData memory data = strategy.getInterestRateData(assetId);
+    data.baseDrawnRate += 1;
+    _publish(HUB, address(0), USDC, abi.encode(data));
+    _publish(HUB, AaveV4BaseFork.MAG7_SPOKE, USDC, abi.encode(data));
+
+    (bool shouldRun, IAgentHub.ActionData[] memory actions) = _check();
+    assertTrue(shouldRun);
+    assertEq(actions[0].markets.length, 1);
+    assertEq(actions[0].markets[0], _marketId(HUB, address(0), USDC));
+
+    _agentHub.execute(actions);
+    assertEq(abi.encode(strategy.getInterestRateData(assetId)), abi.encode(data));
   }
 }

@@ -89,11 +89,62 @@ contract SpokeMock {
   }
 }
 
-contract SpokeConfiguratorMock {
+contract AccessManagerMock {
+  mapping(bytes32 => uint256) internal _permissions;
+
+  function setCanCall(
+    address caller,
+    address target,
+    bytes4 selector,
+    bool allowed,
+    uint32 delay
+  ) external {
+    _permissions[keccak256(abi.encode(caller, target, selector))] =
+      (allowed ? 1 : 0) |
+      (uint256(delay) << 1);
+  }
+
+  function canCall(
+    address caller,
+    address target,
+    bytes4 selector
+  ) external view returns (bool, uint32) {
+    uint256 permission = _permissions[keccak256(abi.encode(caller, target, selector))];
+    return (permission & 1 == 1, uint32(permission >> 1));
+  }
+}
+
+contract ConfiguratorMock {
+  address public authority;
+
+  constructor(address authority_) {
+    authority = authority_;
+  }
+}
+
+contract HubConfiguratorMock is ConfiguratorMock {
+  address public lastHub;
+  uint256 public lastAssetId;
+  bytes public lastIrData;
+  uint256 public calls;
+
+  constructor(address authority_) ConfiguratorMock(authority_) {}
+
+  function updateInterestRateData(address hub, uint256 assetId, bytes calldata irData) external {
+    lastHub = hub;
+    lastAssetId = assetId;
+    lastIrData = irData;
+    calls++;
+  }
+}
+
+contract SpokeConfiguratorMock is ConfiguratorMock {
   address public lastSpoke;
   uint256 public lastReserveId;
   uint256 public lastCollateralRisk;
   uint256 public calls;
+
+  constructor(address authority_) ConfiguratorMock(authority_) {}
 
   function updateCollateralRisk(address spoke, uint256 reserveId, uint256 collateralRisk) external {
     lastSpoke = spoke;

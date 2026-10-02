@@ -35,6 +35,26 @@ contract AaveV4AgentHarness is BaseAaveV4Agent {
     return _reserveId(hub, spoke, asset);
   }
 
+  function spokeAssetId(
+    address hub,
+    address spoke,
+    address asset
+  ) external view returns (bool, uint256) {
+    return _spokeAssetId(hub, spoke, asset);
+  }
+
+  function decodeUint(bytes calldata value, uint256 max) external pure returns (bool, uint256) {
+    return _decodeUint(value, max);
+  }
+
+  function canCallConfigurator(bytes4 selector) external view returns (bool) {
+    return _canCallConfigurator(selector);
+  }
+
+  function _configuratorSelector() internal pure override returns (bytes4) {
+    return ISpokeConfigurator.updateCollateralRisk.selector;
+  }
+
   function _validateUpdate(
     uint256 agentId,
     bytes calldata,
@@ -42,9 +62,8 @@ contract AaveV4AgentHarness is BaseAaveV4Agent {
     Market memory market,
     bytes calldata value
   ) internal view override returns (bool) {
-    if (market.spoke == address(0) || value.length != 32) return false;
-    uint256 newRisk = abi.decode(value, (uint256));
-    if (newRisk > MAX_COLLATERAL_RISK) return false;
+    (bool ok, uint256 newRisk) = _decodeUint(value, MAX_COLLATERAL_RISK);
+    if (!ok) return false;
 
     (bool listed, , uint256 id) = _reserveId(market.hub, market.spoke, market.asset);
     if (!listed) return false;

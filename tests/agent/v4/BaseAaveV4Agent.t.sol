@@ -7,11 +7,15 @@ import {IRiskOracle} from 'chaos-agents/src/contracts/dependencies/IRiskOracle.s
 import {BaseAgentTest} from 'chaos-agents/tests/agent/BaseAgentTest.sol';
 
 import {BaseAaveV4Agent} from '../../../src/contracts/agent/v4/BaseAaveV4Agent.sol';
+import {ISpokeConfigurator} from '../../../src/contracts/dependencies/v4/ISpokeConfigurator.sol';
+import {IHubConfigurator} from '../../../src/contracts/dependencies/v4/IHubConfigurator.sol';
 import {AaveV4AgentHarness} from './mocks/AaveV4AgentHarness.sol';
-import {HubMock, RevertingHubMock, ShortReturnHubMock, LongReturnHubMock, DirtyBoolHubMock, SpokeMock, SpokeConfiguratorMock} from './mocks/AaveV4Mocks.sol';
+import {AaveV4HubAgentHarness} from './mocks/AaveV4HubAgentHarness.sol';
+import {HubMock, RevertingHubMock, ShortReturnHubMock, LongReturnHubMock, DirtyBoolHubMock, SpokeMock, AccessManagerMock, HubConfiguratorMock, SpokeConfiguratorMock} from './mocks/AaveV4Mocks.sol';
 
 contract BaseAaveV4Agent_Test is BaseAgentTest('CollateralRiskUpdate') {
   RangeValidationModule internal _rangeValidationModule;
+  AccessManagerMock internal _accessManager;
   SpokeConfiguratorMock internal _configurator;
   HubMock internal _hub;
   SpokeMock internal _spoke;
@@ -22,12 +26,14 @@ contract BaseAaveV4Agent_Test is BaseAgentTest('CollateralRiskUpdate') {
   uint256 internal constant ASSET_ID = 3;
   uint256 internal constant RESERVE_ID = 5;
   uint24 internal constant CURRENT_RISK = 10_00;
+  bytes4 internal constant SELECTOR = ISpokeConfigurator.updateCollateralRisk.selector;
 
   address internal _market;
 
   function _deployAgent() internal override returns (address) {
     _rangeValidationModule = new RangeValidationModule();
-    _configurator = new SpokeConfiguratorMock();
+    _accessManager = new AccessManagerMock();
+    _configurator = new SpokeConfiguratorMock(address(_accessManager));
     _hub = new HubMock();
     _spoke = new SpokeMock();
 
@@ -42,6 +48,7 @@ contract BaseAaveV4Agent_Test is BaseAgentTest('CollateralRiskUpdate') {
       address(_configurator)
     );
     _market = _harness.marketId(address(_hub), address(_spoke), ASSET);
+    _allow(address(_harness), address(_configurator), SELECTOR, true, 0);
     return address(_harness);
   }
 
@@ -75,6 +82,11 @@ contract BaseAaveV4Agent_Test is BaseAgentTest('CollateralRiskUpdate') {
   function test_constructor_revertsOnZeroConfigurator() public {
     vm.expectRevert(BaseAaveV4Agent.InvalidZeroAddress.selector);
     new AaveV4AgentHarness(address(_agentHub), address(_rangeValidationModule), address(0));
+  }
+
+  function test_constructor_revertsOnZeroRangeValidationModule() public {
+    vm.expectRevert(BaseAaveV4Agent.InvalidZeroAddress.selector);
+    new AaveV4AgentHarness(address(_agentHub), address(0), address(_configurator));
   }
 
   function test_getters() public view {
@@ -200,6 +212,60 @@ contract BaseAaveV4Agent_Test is BaseAgentTest('CollateralRiskUpdate') {
     assertFalse(ok);
   }
 
+  function test_decode_dirtyPadding(uint8 index, uint8 dirt) public view {
+    vm.assume(dirt != 0);
+    bytes memory data = abi.encode(address(_hub), address(_spoke), ASSET, hex'01');
+    assertEq(data.length, 192);
+    data[161 + (index % 31)] = bytes1(dirt);
+    (bool ok, , ) = _harness.decodeUpdate(_update(_market, data));
+    assertFalse(ok);
+  }
+
+  function test_decodeUint(uint256 value, uint256 max) public view {
+    (bool ok, uint256 decoded) = _harness.decodeUint(abi.encode(value), max);
+    assertEq(ok, value <= max);
+    assertEq(decoded, value <= max ? value : 0);
+  }
+
+  function test_decodeUint_badLength(bytes memory value) public view {
+    vm.assume(value.length != 32);
+    (bool ok, ) = _harness.decodeUint(value, type(uint256).max);
+    assertFalse(ok);
+  }
+
+  function test_canCallConfigurator() public {
+    assertTrue(_harness.canCallConfigurator(SELECTOR));
+    assertFalse(_harness.canCallConfigurator(bytes4(0xdeadbeef)));
+
+    _allow(address(_harness), address(_configurator), SELECTOR, true, 1);
+    assertFalse(_harness.canCallConfigurator(SELECTOR));
+    _allow(address(_harness), address(_configurator), SELECTOR, false, 0);
+    assertFalse(_harness.canCallConfigurator(SELECTOR));
+  }
+
+  function test_canCallConfigurator_badAuthority() public {
+    address[4] memory authorities = [
+      address(new RevertingHubMock()),
+      address(new ShortReturnHubMock()),
+      address(new DirtyBoolHubMock()),
+      address(0xC0DE)
+    ];
+    for (uint256 i = 0; i < authorities.length; i++) {
+      AaveV4AgentHarness harness = new AaveV4AgentHarness(
+        address(_agentHub),
+        address(_rangeValidationModule),
+        address(new SpokeConfiguratorMock(authorities[i]))
+      );
+      assertFalse(harness.canCallConfigurator(SELECTOR));
+    }
+    AaveV4AgentHarness noAuthority = new AaveV4AgentHarness(
+      address(_agentHub),
+      address(_rangeValidationModule),
+      address(_spoke)
+    );
+    assertFalse(noAuthority.canCallConfigurator(SELECTOR));
+  }
+
   function test_assetId() public view {
     (bool ok, uint256 assetId) = _harness.assetId(address(_hub), ASSET);
     assertTrue(ok);
@@ -236,6 +302,22 @@ contract BaseAaveV4Agent_Test is BaseAgentTest('CollateralRiskUpdate') {
     assertTrue(ok);
     assertEq(assetId, ASSET_ID);
     assertEq(reserveId, RESERVE_ID);
+  }
+
+  function test_spokeAssetId() public {
+    address spoke = address(new SpokeMock());
+    (bool ok, uint256 assetId) = _harness.spokeAssetId(address(_hub), spoke, ASSET);
+    assertFalse(ok);
+
+    _hub.listSpoke(ASSET_ID, spoke);
+    (ok, assetId) = _harness.spokeAssetId(address(_hub), spoke, ASSET);
+    assertTrue(ok);
+    assertEq(assetId, ASSET_ID);
+    (ok, , ) = _harness.reserveId(address(_hub), spoke, ASSET);
+    assertFalse(ok);
+
+    (ok, ) = _harness.spokeAssetId(address(_hub), spoke, OTHER_ASSET);
+    assertFalse(ok);
   }
 
   function test_reserveId_spokeNotListedOnHub() public {
@@ -300,6 +382,92 @@ contract BaseAaveV4Agent_Test is BaseAgentTest('CollateralRiskUpdate') {
     );
   }
 
+  function test_validate_hubLevelMarketOnSpokeAgent() public {
+    _hub.listSpoke(ASSET_ID, address(0));
+    address market = _harness.marketId(address(_hub), address(0), ASSET);
+    bytes memory data = abi.encode(address(_hub), address(0), ASSET, abi.encode(11_00));
+    assertFalse(_harness.validate(_agentId, _agentContext, _update(market, data)));
+  }
+
+  function test_validate_cannotCallConfigurator() public {
+    IRiskOracle.RiskParameterUpdate memory update = _update(_market, _payload(11_00));
+    _allow(address(_harness), address(_configurator), SELECTOR, false, 0);
+    assertFalse(_harness.validate(_agentId, _agentContext, update));
+    _allow(address(_harness), address(_configurator), SELECTOR, true, 1 days);
+    assertFalse(_harness.validate(_agentId, _agentContext, update));
+  }
+
+  function test_check_unauthorizedAgentDoesNotBlockOtherAgent() public {
+    AaveV4AgentHarness other = new AaveV4AgentHarness(
+      address(_agentHub),
+      address(_rangeValidationModule),
+      address(_configurator)
+    );
+    _allow(address(other), address(_configurator), SELECTOR, true, 0);
+    uint256 otherId = _register(address(other), _market);
+    _rangeValidationModule.setDefaultRangeConfig(
+      address(_agentHub),
+      otherId,
+      'CollateralRisk',
+      IRangeValidationModule.RangeConfig({
+        maxIncrease: 5_00,
+        maxDecrease: 5_00,
+        isIncreaseRelative: false,
+        isDecreaseRelative: false
+      })
+    );
+    _publish(_market, _payload(12_00));
+    _allow(address(_harness), address(_configurator), SELECTOR, false, 0);
+
+    uint256[] memory agentIds = new uint256[](2);
+    agentIds[0] = _agentId;
+    agentIds[1] = otherId;
+    (bool shouldRun, IAgentHub.ActionData[] memory actions) = _agentHub.check(agentIds);
+    assertTrue(shouldRun);
+    assertEq(actions.length, 1);
+    assertEq(actions[0].agentId, otherId);
+    _agentHub.execute(actions);
+    assertEq(_configurator.calls(), 1);
+  }
+
+  function test_hubLevel_checkAndExecute() public {
+    HubConfiguratorMock configurator = new HubConfiguratorMock(address(_accessManager));
+    AaveV4HubAgentHarness hubAgent = new AaveV4HubAgentHarness(
+      address(_agentHub),
+      address(_rangeValidationModule),
+      _updateType,
+      address(configurator)
+    );
+    _allow(
+      address(hubAgent),
+      address(configurator),
+      IHubConfigurator.updateInterestRateData.selector,
+      true,
+      0
+    );
+    address hubMarket = hubAgent.marketId(address(_hub), address(0), ASSET);
+    address spokeMarket = hubAgent.marketId(address(_hub), address(_spoke), ASSET);
+    uint256 hubAgentId = _register(address(hubAgent), hubMarket);
+    _agentHub.addAllowedMarket(hubAgentId, spokeMarket);
+
+    bytes memory irData = abi.encode(uint256(80_00), uint256(1), uint256(2), uint256(3));
+    _publish(hubMarket, abi.encode(address(_hub), address(0), ASSET, irData));
+    _publish(spokeMarket, abi.encode(address(_hub), address(_spoke), ASSET, irData));
+
+    uint256[] memory agentIds = new uint256[](1);
+    agentIds[0] = hubAgentId;
+    (bool shouldRun, IAgentHub.ActionData[] memory actions) = _agentHub.check(agentIds);
+    assertTrue(shouldRun);
+    assertEq(actions[0].markets.length, 1);
+    assertEq(actions[0].markets[0], hubMarket);
+
+    _agentHub.execute(actions);
+    assertEq(configurator.calls(), 1);
+    assertEq(configurator.lastHub(), address(_hub));
+    assertEq(configurator.lastAssetId(), ASSET_ID);
+    assertEq(configurator.lastIrData(), irData);
+  }
+
   function test_inject() public {
     vm.prank(address(_agentHub));
     _harness.inject(_agentId, _agentContext, _update(_market, _payload(12_00)));
@@ -352,6 +520,37 @@ contract BaseAaveV4Agent_Test is BaseAgentTest('CollateralRiskUpdate') {
     _agentHub.addAllowedMarket(_agentId, otherMarket);
     _publish(otherMarket, _payload(12_00));
     assertFalse(_checkAndPerformAutomation(_agentId));
+  }
+
+  function _allow(
+    address caller,
+    address target,
+    bytes4 selector,
+    bool allowed,
+    uint32 delay
+  ) internal {
+    _accessManager.setCanCall(caller, target, selector, allowed, delay);
+  }
+
+  function _register(address agent, address market) internal returns (uint256) {
+    return
+      _agentHub.registerAgent(
+        IAgentConfigurator.AgentRegistrationInput({
+          agentAddress: agent,
+          riskOracle: address(_riskOracle),
+          admin: address(this),
+          agentContext: '',
+          isAgentEnabled: true,
+          isAgentPermissioned: false,
+          isMarketsFromAgentEnabled: false,
+          expirationPeriod: 1 days,
+          minimumDelay: 1 days,
+          updateType: _updateType,
+          allowedMarkets: _addressToArray(market),
+          restrictedMarkets: new address[](0),
+          permissionedSenders: new address[](0)
+        })
+      );
   }
 
   function _payload(uint256 value) internal view returns (bytes memory) {

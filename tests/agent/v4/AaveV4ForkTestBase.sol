@@ -33,6 +33,7 @@ library AaveV4BaseFork {
   address internal constant MAG7_SPOKE = 0x17905Db0e4A3514467539956c084180616AE7B8D;
   address internal constant MAG7_SPOKE_ORACLE = 0xaBaf048fD7675Ea34a84332371ffd5D55E322A47;
   address internal constant TREASURY_SPOKE = 0x5F8d0102F5B51Fae6DE9d2F2561bda63Fb5Db674;
+  address internal constant USDC_TOKENIZATION_SPOKE = 0x7081CE7EB1282c53CF38EA9B622f6269cb8FeFDc;
   address internal constant AAPLc = 0xb200000000000000000000C2e324d24d7eEcd1fb;
   address internal constant NVDAc = 0xb20000000000000000000078ee7ce2fE4908108C;
   address internal constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
@@ -132,7 +133,7 @@ abstract contract AaveV4ForkTestBase is Test {
 
   function _grantRole(address target, bytes4 selector, address account) internal returns (uint64) {
     IAccessManagerLike accessManager = IAccessManagerLike(_accessManager());
-    uint64 roleId = accessManager.getTargetFunctionRole(target, selector);
+    uint64 roleId = _mappedRole(accessManager, target, selector);
     address admin = accessManager.getRoleMember(accessManager.getRoleAdmin(roleId), 0);
 
     vm.prank(admin);
@@ -147,9 +148,18 @@ abstract contract AaveV4ForkTestBase is Test {
 
   function _revokeRole(address target, bytes4 selector, address account) internal {
     IAccessManagerLike accessManager = IAccessManagerLike(_accessManager());
-    uint64 roleId = accessManager.getTargetFunctionRole(target, selector);
+    uint64 roleId = _mappedRole(accessManager, target, selector);
     vm.prank(accessManager.getRoleMember(accessManager.getRoleAdmin(roleId), 0));
     accessManager.revokeRole(roleId, account);
+  }
+
+  function _mappedRole(
+    IAccessManagerLike accessManager,
+    address target,
+    bytes4 selector
+  ) internal view returns (uint64 roleId) {
+    roleId = accessManager.getTargetFunctionRole(target, selector);
+    assertTrue(roleId != 0 && roleId != type(uint64).max, 'selector not mapped');
   }
 
   function _check() internal view returns (bool, IAgentHub.ActionData[] memory) {
