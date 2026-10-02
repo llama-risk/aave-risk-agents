@@ -3,6 +3,7 @@ pragma solidity ^0.8.27;
 
 import {Vm} from 'forge-std/Vm.sol';
 import {AaveV3Ethereum, AaveV3EthereumAssets} from 'aave-address-book/AaveV3Ethereum.sol';
+import {AaveV3EthereumEtherFi, AaveV3EthereumEtherFiAssets} from 'aave-address-book/AaveV3EthereumEtherFi.sol';
 import {AaveV3EthereumLido} from 'aave-address-book/AaveV3EthereumLido.sol';
 import {IPriceCapAdapter} from 'aave-price-feeds/interfaces/IPriceCapAdapter.sol';
 import {IPendlePriceCapAdapter} from 'aave-price-feeds/interfaces/IPendlePriceCapAdapter.sol';
@@ -87,9 +88,10 @@ abstract contract AaveV4AdapterAgentForkTestBase is AaveV4ForkTestBase {
   }
 
   function _v3Oracles() internal pure returns (address[] memory oracles) {
-    oracles = new address[](2);
+    oracles = new address[](3);
     oracles[0] = address(AaveV3Ethereum.ORACLE);
     oracles[1] = address(AaveV3EthereumLido.ORACLE);
+    oracles[2] = address(AaveV3EthereumEtherFi.ORACLE);
   }
 
   function _detachFromV3(address asset) internal {
@@ -255,6 +257,32 @@ contract AaveV4CapoAgent_EthereumForkTest is AaveV4AdapterAgentForkTestBase {
     _publish(HUB, MAIN_SPOKE, wstETH, abi.encode(_nextParams(wstETH_CAPO, 1_00)));
     (bool shouldRun, ) = _check();
     assertFalse(shouldRun);
+  }
+
+  function test_check_rejectsEtherFiOnlyAdapter() public {
+    address weETH = AaveV3EthereumEtherFiAssets.weETH_UNDERLYING;
+    IPriceCapAdapter etherFiCapo = IPriceCapAdapter(
+      AaveV3EthereumEtherFi.ORACLE.getSourceOfAsset(weETH)
+    );
+    assertEq(address(etherFiCapo.ACL_MANAGER()), address(AaveV3Ethereum.ACL_MANAGER));
+    assertTrue(AaveV3Ethereum.ORACLE.getSourceOfAsset(weETH) != address(etherFiCapo));
+    vm.mockCall(
+      ISpoke(MAIN_SPOKE).ORACLE(),
+      abi.encodeCall(IAaveOracle.getReserveSource, (_reserveIdOf(HUB, MAIN_SPOKE, weETH))),
+      abi.encode(address(etherFiCapo))
+    );
+    _agentHub.addAllowedMarket(_agentId, _marketId(HUB, MAIN_SPOKE, weETH));
+    _publish(HUB, MAIN_SPOKE, weETH, abi.encode(_nextParams(etherFiCapo, 1_00)));
+    (bool shouldRun, ) = _check();
+    assertFalse(shouldRun);
+
+    vm.mockCall(
+      address(AaveV3EthereumEtherFi.ORACLE),
+      abi.encodeWithSignature('getSourceOfAsset(address)', weETH),
+      abi.encode(address(0))
+    );
+    (shouldRun, ) = _check();
+    assertTrue(shouldRun);
   }
 
   function test_check_rejectsUntrustedHub() public {

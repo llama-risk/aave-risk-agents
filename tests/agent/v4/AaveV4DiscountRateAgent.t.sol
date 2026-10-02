@@ -10,7 +10,7 @@ import {BaseAgentTest} from 'chaos-agents/tests/agent/BaseAgentTest.sol';
 import {AaveV4DiscountRateAgent} from '../../../src/contracts/agent/v4/AaveV4DiscountRateAgent.sol';
 import {BaseAaveV4Agent} from '../../../src/contracts/agent/v4/BaseAaveV4Agent.sol';
 import {HubMock} from './mocks/AaveV4Mocks.sol';
-import {OracleSpokeMock, AaveOracleMock, ACLManagerMock, FeedMock, PrincipalTokenMock} from './mocks/AaveV4AdapterMocks.sol';
+import {OracleSpokeMock, AaveOracleMock, ACLManagerMock, FeedMock, PrincipalTokenMock, V3OracleMock} from './mocks/AaveV4AdapterMocks.sol';
 
 contract AaveV4DiscountRateAgent_Test is BaseAgentTest('PendleDiscountRateUpdate') {
   uint256 internal constant START = 1750000000;
@@ -57,7 +57,7 @@ contract AaveV4DiscountRateAgent_Test is BaseAgentTest('PendleDiscountRateUpdate
       '',
       address(_aclManager),
       _addressToArray(address(_hub)),
-      new address[](0)
+      _addressToArray(address(new V3OracleMock()))
     );
     _aclManager.setRiskAdmin(address(_discountAgent), true);
     _market = _discountAgent.marketId(address(_hub), address(_spoke), ASSET);
@@ -89,6 +89,18 @@ contract AaveV4DiscountRateAgent_Test is BaseAgentTest('PendleDiscountRateUpdate
       address(_rangeValidationModule),
       '',
       address(0),
+      _addressToArray(address(_hub)),
+      new address[](0)
+    );
+  }
+
+  function test_constructor_revertsOnEmptyV3Oracles() public {
+    vm.expectRevert(BaseAaveV4Agent.InvalidZeroAddress.selector);
+    new AaveV4DiscountRateAgent(
+      address(_agentHub),
+      address(_rangeValidationModule),
+      '',
+      address(_aclManager),
       _addressToArray(address(_hub)),
       new address[](0)
     );

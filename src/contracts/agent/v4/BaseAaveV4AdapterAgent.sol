@@ -19,7 +19,8 @@ import {BaseAaveV4Agent} from './BaseAaveV4Agent.sol';
  *         admin on it. Adapters that a v3 oracle uses as the source of the asset are rejected, so
  *         only v4-only adapters are written. The adapter is the rate-limited unit: the range
  *         config is keyed by the adapter address, and the agent minimum delay applies per adapter
- *         across every market that resolves to it.
+ *         across every market that resolves to it, with at most one write per adapter per block.
+ *         The v3 oracle list must cover every v3 oracle that has a source on the CONFIGURATOR.
  */
 abstract contract BaseAaveV4AdapterAgent is BaseAaveV4Agent {
   address[] internal _hubs;
@@ -39,6 +40,7 @@ abstract contract BaseAaveV4AdapterAgent is BaseAaveV4Agent {
     for (uint256 i = 0; i < hubs.length; i++) {
       require(hubs[i] != address(0), InvalidZeroAddress());
     }
+    require(v3Oracles.length != 0, InvalidZeroAddress());
     for (uint256 i = 0; i < v3Oracles.length; i++) {
       require(v3Oracles[i] != address(0), InvalidZeroAddress());
     }
@@ -91,6 +93,7 @@ abstract contract BaseAaveV4AdapterAgent is BaseAaveV4Agent {
       !ok ||
       word != uint256(uint160(CONFIGURATOR)) ||
       _isV3Source(market.asset, adapter) ||
+      _lastAdapterUpdate[adapter] == block.timestamp ||
       block.timestamp - _lastAdapterUpdate[adapter] <
       IAgentConfigurator(AGENT_HUB).getMinimumDelay(agentId)
     ) {
