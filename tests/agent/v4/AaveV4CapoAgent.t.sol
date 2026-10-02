@@ -10,7 +10,7 @@ import {BaseAgentTest} from 'chaos-agents/tests/agent/BaseAgentTest.sol';
 import {AaveV4CapoAgent} from '../../../src/contracts/agent/v4/AaveV4CapoAgent.sol';
 import {BaseAaveV4Agent} from '../../../src/contracts/agent/v4/BaseAaveV4Agent.sol';
 import {HubMock} from './mocks/AaveV4Mocks.sol';
-import {OracleSpokeMock, AaveOracleMock, ACLManagerMock, FeedMock} from './mocks/AaveV4AdapterMocks.sol';
+import {OracleSpokeMock, AaveOracleMock, ACLManagerMock, FeedMock, V3OracleMock} from './mocks/AaveV4AdapterMocks.sol';
 
 contract AaveV4CapoAgent_Test is BaseAgentTest('CapoPriceCapUpdate') {
   uint256 internal constant START = 1750000000;
@@ -26,6 +26,7 @@ contract AaveV4CapoAgent_Test is BaseAgentTest('CapoPriceCapUpdate') {
   HubMock internal _hub;
   OracleSpokeMock internal _spoke;
   AaveOracleMock internal _oracle;
+  V3OracleMock internal _v3Oracle;
   CLRatePriceCapAdapter internal _capo;
   AaveV4CapoAgent internal _capoAgent;
   address internal _market;
@@ -42,6 +43,7 @@ contract AaveV4CapoAgent_Test is BaseAgentTest('CapoPriceCapUpdate') {
     _hub = new HubMock();
     _spoke = new OracleSpokeMock();
     _oracle = new AaveOracleMock();
+    _v3Oracle = new V3OracleMock();
 
     _hub.listAsset(ASSET, ASSET_ID);
     _hub.listSpoke(ASSET_ID, address(_spoke));
@@ -55,7 +57,9 @@ contract AaveV4CapoAgent_Test is BaseAgentTest('CapoPriceCapUpdate') {
       address(_agentHub),
       address(_rangeValidationModule),
       '',
-      address(_aclManager)
+      address(_aclManager),
+      _addressToArray(address(_hub)),
+      _addressToArray(address(_v3Oracle))
     );
     _aclManager.setRiskAdmin(address(_capoAgent), true);
     _market = _capoAgent.marketId(address(_hub), address(_spoke), ASSET);
@@ -79,11 +83,50 @@ contract AaveV4CapoAgent_Test is BaseAgentTest('CapoPriceCapUpdate') {
     assertEq(_capoAgent.getUpdateType(), 'CapoPriceCapUpdate');
     assertEq(_capoAgent.CONFIGURATOR(), address(_aclManager));
     assertEq(_capoAgent.getMarkets(_agentId).length, 0);
+    assertEq(_capoAgent.getHubs(), _addressToArray(address(_hub)));
+    assertEq(_capoAgent.getV3Oracles(), _addressToArray(address(_v3Oracle)));
+    assertEq(_capoAgent.getLastAdapterUpdate(address(_capo)), 0);
   }
 
-  function test_constructor_revertsOnZeroAclManager() public {
+  function test_constructor_revertsOnZeroAddress() public {
+    address[] memory hubs = _addressToArray(address(_hub));
+    address[] memory none = new address[](0);
     vm.expectRevert(BaseAaveV4Agent.InvalidZeroAddress.selector);
-    new AaveV4CapoAgent(address(_agentHub), address(_rangeValidationModule), '', address(0));
+    new AaveV4CapoAgent(
+      address(_agentHub),
+      address(_rangeValidationModule),
+      '',
+      address(0),
+      hubs,
+      none
+    );
+    vm.expectRevert(BaseAaveV4Agent.InvalidZeroAddress.selector);
+    new AaveV4CapoAgent(
+      address(_agentHub),
+      address(_rangeValidationModule),
+      '',
+      address(_aclManager),
+      none,
+      none
+    );
+    vm.expectRevert(BaseAaveV4Agent.InvalidZeroAddress.selector);
+    new AaveV4CapoAgent(
+      address(_agentHub),
+      address(_rangeValidationModule),
+      '',
+      address(_aclManager),
+      _addressToArray(address(0)),
+      none
+    );
+    vm.expectRevert(BaseAaveV4Agent.InvalidZeroAddress.selector);
+    new AaveV4CapoAgent(
+      address(_agentHub),
+      address(_rangeValidationModule),
+      '',
+      address(_aclManager),
+      hubs,
+      _addressToArray(address(0))
+    );
   }
 
   function test_validate_valid() public view {
@@ -202,7 +245,121 @@ contract AaveV4CapoAgent_Test is BaseAgentTest('CapoPriceCapUpdate') {
     assertFalse(_validate(params));
 
     _aclManager.setPoolAdmin(address(_capoAgent), true);
+    assertFalse(_validate(params));
+
+    _aclManager.setRiskAdmin(address(_capoAgent), true);
     assertTrue(_validate(params));
+  }
+
+  function test_validate_untrustedHub() public {
+    HubMock hub = new HubMock();
+    hub.listAsset(ASSET, ASSET_ID);
+    hub.listSpoke(ASSET_ID, address(_spoke));
+    _spoke.addReserve(address(hub), ASSET_ID, RESERVE_ID);
+
+    bytes memory payload = abi.encode(
+      address(hub),
+      address(_spoke),
+      ASSET,
+      abi.encode(_params(SNAPSHOT_RATIO, _latestTimestamp(), MAX_GROWTH))
+    );
+    assertFalse(
+      _capoAgent.validate(
+        _agentId,
+        '',
+        _update(_capoAgent.marketId(address(hub), address(_spoke), ASSET), payload)
+      )
+    );
+  }
+
+  function test_validate_v3Source() public {
+    IPriceCapAdapter.PriceCapUpdateParams memory params = _params(
+      SNAPSHOT_RATIO,
+      _latestTimestamp(),
+      MAX_GROWTH
+    );
+    _v3Oracle.setSource(ASSET, address(0xdead));
+    assertTrue(_validate(params));
+
+    _v3Oracle.setSource(ASSET, address(_capo));
+    assertFalse(_validate(params));
+
+    _v3Oracle.setSource(ASSET, address(0));
+    vm.mockCallRevert(
+      address(_v3Oracle),
+      abi.encodeWithSignature('getSourceOfAsset(address)', ASSET),
+      ''
+    );
+    assertFalse(_validate(params));
+  }
+
+  function test_execute_sharedAdapterCooldown() public {
+    OracleSpokeMock spoke = new OracleSpokeMock();
+    spoke.addReserve(address(_hub), ASSET_ID, RESERVE_ID);
+    spoke.setOracle(address(_oracle));
+    _hub.listSpoke(ASSET_ID, address(spoke));
+    address market = _capoAgent.marketId(address(_hub), address(spoke), ASSET);
+    _agentHub.addAllowedMarket(_agentId, market);
+
+    _publish(_market, _payload(_params(SNAPSHOT_RATIO + 4e16, _latestTimestamp(), MAX_GROWTH)));
+    assertTrue(_checkAndPerformAutomation(_agentId));
+    assertEq(_capoAgent.getLastAdapterUpdate(address(_capo)), block.timestamp);
+
+    vm.warp(block.timestamp + 1);
+    bytes memory payload = abi.encode(
+      address(_hub),
+      address(spoke),
+      ASSET,
+      abi.encode(_params(SNAPSHOT_RATIO + 8e16, _latestTimestamp(), MAX_GROWTH))
+    );
+    _publish(market, payload);
+    assertFalse(_capoAgent.validate(_agentId, '', _update(market, payload)));
+    (bool shouldRun, ) = _agentHub.check(_uintToArray(_agentId));
+    assertFalse(shouldRun);
+
+    vm.warp(block.timestamp + _agentHub.getMinimumDelay(_agentId) - 1);
+    assertTrue(_capoAgent.validate(_agentId, '', _update(market, payload)));
+  }
+
+  function test_validate_rangeKeyedByAdapter() public {
+    IPriceCapAdapter.PriceCapUpdateParams memory params = _params(
+      (SNAPSHOT_RATIO * 108) / 100,
+      _latestTimestamp(),
+      MAX_GROWTH
+    );
+    assertFalse(_validate(params));
+
+    _setMarketRange(_market, 'CapoSnapshotRatio', 10_00);
+    assertFalse(_validate(params));
+
+    _setMarketRange(address(_capo), 'CapoSnapshotRatio', 10_00);
+    assertTrue(_validate(params));
+  }
+
+  function test_validate_snapshotMayOverflowSoon() public {
+    _rangeValidationModule.setDefaultRangeConfig(
+      address(_agentHub),
+      _agentId,
+      'CapoSnapshotRatio',
+      IRangeValidationModule.RangeConfig({
+        maxIncrease: type(uint120).max,
+        maxDecrease: type(uint120).max,
+        isIncreaseRelative: false,
+        isDecreaseRelative: false
+      })
+    );
+    uint256 limit = (uint256(type(uint104).max) * 100_00) / (100_00 + 3 * uint256(MAX_GROWTH));
+    uint104 above = uint104(limit + 1e18);
+    uint104 below = uint104(limit - 1e18);
+    assertTrue(_validate(_params(above, _latestTimestamp(), MAX_GROWTH)));
+
+    vm.mockCall(
+      address(_capo),
+      abi.encodeWithSignature('MINIMAL_RATIO_INCREASE_LIFETIME()'),
+      abi.encode(3)
+    );
+    assertFalse(_validate(_params(above, _latestTimestamp(), MAX_GROWTH)));
+    assertTrue(_validate(_params(below, _latestTimestamp(), MAX_GROWTH)));
   }
 
   function test_validate_adapterOnOtherAclManager() public {
@@ -335,6 +492,26 @@ contract AaveV4CapoAgent_Test is BaseAgentTest('CapoPriceCapUpdate') {
         isDecreaseRelative: true
       })
     );
+  }
+
+  function _setMarketRange(address market, string memory updateType, uint256 maxChange) internal {
+    _rangeValidationModule.setRangeConfigByMarket(
+      address(_agentHub),
+      _agentId,
+      market,
+      updateType,
+      IRangeValidationModule.RangeConfig({
+        maxIncrease: uint120(maxChange),
+        maxDecrease: uint120(maxChange),
+        isIncreaseRelative: true,
+        isDecreaseRelative: true
+      })
+    );
+  }
+
+  function _uintToArray(uint256 input) internal pure returns (uint256[] memory output) {
+    output = new uint256[](1);
+    output[0] = input;
   }
 
   function _latestTimestamp() internal view returns (uint48) {

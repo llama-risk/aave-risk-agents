@@ -18,14 +18,18 @@ contract AaveV4DiscountRateAgent is BaseAaveV4AdapterAgent {
     address agentHub,
     address rangeValidationModule,
     string memory updateTypeSuffix,
-    address aclManager
+    address aclManager,
+    address[] memory hubs,
+    address[] memory v3Oracles
   )
     BaseAaveV4AdapterAgent(
       agentHub,
       rangeValidationModule,
       'PendleDiscountRateUpdate',
       updateTypeSuffix,
-      aclManager
+      aclManager,
+      hubs,
+      v3Oracles
     )
   {}
 
@@ -43,7 +47,7 @@ contract AaveV4DiscountRateAgent is BaseAaveV4AdapterAgent {
     (bool ok, uint256 discountRate) = _decodeUint(value, type(uint64).max);
     if (!ok || discountRate == 0) return false;
 
-    address adapter = _adapter(market);
+    address adapter = _adapter(agentId, market);
     if (adapter == address(0)) return false;
 
     uint256 currentDiscountRate;
@@ -56,7 +60,7 @@ contract AaveV4DiscountRateAgent is BaseAaveV4AdapterAgent {
       RANGE_VALIDATION_MODULE.validate(
         AGENT_HUB,
         agentId,
-        update.market,
+        adapter,
         IRangeValidationModule.RangeValidationInput({
           from: currentDiscountRate,
           to: discountRate,
@@ -66,13 +70,15 @@ contract AaveV4DiscountRateAgent is BaseAaveV4AdapterAgent {
   }
 
   function _injectUpdate(
-    uint256,
+    uint256 agentId,
     bytes calldata,
     IRiskOracle.RiskParameterUpdate calldata,
     Market memory market,
     bytes calldata value
   ) internal override {
-    IPendlePriceCapAdapter(_adapter(market)).setDiscountRatePerYear(abi.decode(value, (uint64)));
+    IPendlePriceCapAdapter(_writeAdapter(agentId, market)).setDiscountRatePerYear(
+      abi.decode(value, (uint64))
+    );
   }
 
   function _isValidRate(address adapter, uint256 discountRate) internal view returns (bool) {

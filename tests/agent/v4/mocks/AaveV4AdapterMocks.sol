@@ -53,3 +53,11 @@ contract PrincipalTokenMock {
     expiry = expiry_;
   }
 }
+
+contract V3OracleMock {
+  mapping(address => address) public getSourceOfAsset;
+
+  function setSource(address asset, address source) external {
+    getSourceOfAsset[asset] = source;
+  }
+}

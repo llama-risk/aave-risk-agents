@@ -55,7 +55,9 @@ contract AaveV4DiscountRateAgent_Test is BaseAgentTest('PendleDiscountRateUpdate
       address(_agentHub),
       address(_rangeValidationModule),
       '',
-      address(_aclManager)
+      address(_aclManager),
+      _addressToArray(address(_hub)),
+      new address[](0)
     );
     _aclManager.setRiskAdmin(address(_discountAgent), true);
     _market = _discountAgent.marketId(address(_hub), address(_spoke), ASSET);
@@ -86,7 +88,9 @@ contract AaveV4DiscountRateAgent_Test is BaseAgentTest('PendleDiscountRateUpdate
       address(_agentHub),
       address(_rangeValidationModule),
       '',
-      address(0)
+      address(0),
+      _addressToArray(address(_hub)),
+      new address[](0)
     );
   }
 
@@ -149,7 +153,31 @@ contract AaveV4DiscountRateAgent_Test is BaseAgentTest('PendleDiscountRateUpdate
     assertFalse(_validate(DISCOUNT_RATE + 1));
 
     _aclManager.setPoolAdmin(address(_discountAgent), true);
-    assertTrue(_validate(DISCOUNT_RATE + 1));
+    assertFalse(_validate(DISCOUNT_RATE + 1));
+  }
+
+  function test_execute_adapterCooldownAndRangeKey() public {
+    _rangeValidationModule.setRangeConfigByMarket(
+      address(_agentHub),
+      _agentId,
+      address(_pendle),
+      _updateType,
+      IRangeValidationModule.RangeConfig({
+        maxIncrease: uint120(MAX_CHANGE * 2),
+        maxDecrease: uint120(MAX_CHANGE * 2),
+        isIncreaseRelative: false,
+        isDecreaseRelative: false
+      })
+    );
+    _publish(_market, _payload(DISCOUNT_RATE + MAX_CHANGE * 2));
+    assertTrue(_checkAndPerformAutomation(_agentId));
+    assertEq(_pendle.discountRatePerYear(), DISCOUNT_RATE + MAX_CHANGE * 2);
+    assertEq(_discountAgent.getLastAdapterUpdate(address(_pendle)), block.timestamp);
+
+    vm.warp(block.timestamp + 1 days - 1);
+    assertFalse(_validate(DISCOUNT_RATE));
+    vm.warp(block.timestamp + 1);
+    assertTrue(_validate(DISCOUNT_RATE));
   }
 
   function test_validate_badSource() public {

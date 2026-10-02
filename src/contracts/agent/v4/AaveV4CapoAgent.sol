@@ -14,18 +14,27 @@ import {BaseAaveV4AdapterAgent} from './BaseAaveV4AdapterAgent.sol';
  *         of an Aave v4 reserve. The value is abi.encode(IPriceCapAdapter.PriceCapUpdateParams).
  */
 contract AaveV4CapoAgent is BaseAaveV4AdapterAgent {
+  bytes4 internal constant MINIMAL_RATIO_INCREASE_LIFETIME =
+    bytes4(keccak256('MINIMAL_RATIO_INCREASE_LIFETIME()'));
+  uint256 internal constant PERCENTAGE_FACTOR = 1e4;
+  uint256 internal constant SECONDS_PER_YEAR = 365 days;
+
   constructor(
     address agentHub,
     address rangeValidationModule,
     string memory updateTypeSuffix,
-    address aclManager
+    address aclManager,
+    address[] memory hubs,
+    address[] memory v3Oracles
   )
     BaseAaveV4AdapterAgent(
       agentHub,
       rangeValidationModule,
       'CapoPriceCapUpdate',
       updateTypeSuffix,
-      aclManager
+      aclManager,
+      hubs,
+      v3Oracles
     )
   {}
 
@@ -36,30 +45,30 @@ contract AaveV4CapoAgent is BaseAaveV4AdapterAgent {
   function _validateUpdate(
     uint256 agentId,
     bytes calldata,
-    IRiskOracle.RiskParameterUpdate calldata update,
+    IRiskOracle.RiskParameterUpdate calldata,
     Market memory market,
     bytes calldata value
   ) internal view override returns (bool) {
     (bool ok, IPriceCapAdapter.PriceCapUpdateParams memory params) = _decodeCapParams(value);
     if (!ok) return false;
 
-    address adapter = _adapter(market);
+    address adapter = _adapter(agentId, market);
     if (adapter == address(0) || !_isValidSnapshot(adapter, params)) return false;
 
     IRangeValidationModule.RangeValidationInput[] memory input;
     (ok, input) = _rangeInput(adapter, params);
-    return ok && RANGE_VALIDATION_MODULE.validate(AGENT_HUB, agentId, update.market, input);
+    return ok && RANGE_VALIDATION_MODULE.validate(AGENT_HUB, agentId, adapter, input);
   }
 
   function _injectUpdate(
-    uint256,
+    uint256 agentId,
     bytes calldata,
     IRiskOracle.RiskParameterUpdate calldata,
     Market memory market,
     bytes calldata value
   ) internal override {
     (, IPriceCapAdapter.PriceCapUpdateParams memory params) = _decodeCapParams(value);
-    IPriceCapAdapter(_adapter(market)).setCapParameters(params);
+    IPriceCapAdapter(_writeAdapter(agentId, market)).setCapParameters(params);
   }
 
   function _rangeInput(
@@ -111,9 +120,23 @@ contract AaveV4CapoAgent is BaseAaveV4AdapterAgent {
     // adapters deployed before MAXIMUM_SNAPSHOT_TERM existed have no maximum snapshot age
     uint256 maximumTerm;
     (ok, maximumTerm) = _read(adapter, IPriceCapAdapter.MAXIMUM_SNAPSHOT_TERM.selector);
+    if (
+      ok &&
+      (maximumTerm > block.timestamp || params.snapshotTimestamp < block.timestamp - maximumTerm)
+    ) {
+      return false;
+    }
+
+    // older adapters revert with SnapshotMayOverflowSoon past this bound
+    uint256 lifetime;
+    (ok, lifetime) = _read(adapter, MINIMAL_RATIO_INCREASE_LIFETIME);
+    if (!ok) return true;
+    uint256 growthPerSecond = (uint256(params.snapshotRatio) * params.maxYearlyRatioGrowthPercent) /
+      PERCENTAGE_FACTOR /
+      SECONDS_PER_YEAR;
     return
-      !ok ||
-      (maximumTerm <= block.timestamp && params.snapshotTimestamp >= block.timestamp - maximumTerm);
+      lifetime <= type(uint32).max &&
+      params.snapshotRatio + growthPerSecond * SECONDS_PER_YEAR * lifetime <= type(uint104).max;
   }
 
   function _decodeCapParams(
