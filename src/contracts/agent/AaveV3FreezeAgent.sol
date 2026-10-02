@@ -24,7 +24,7 @@ contract AaveV3FreezeAgent is BaseAaveAgent {
   IPoolConfigurator public immutable POOL_CONFIGURATOR;
 
   /**
-   * @notice The update is not an escalation of the current reserve level
+   * @notice The update did not pass validation at injection time
    */
   error InvalidUpdate();
 
@@ -44,7 +44,7 @@ contract AaveV3FreezeAgent is BaseAaveAgent {
   /**
    * @notice method to get the current level of a reserve as read from the pool
    * @param asset the address of the reserve
-   * @return the current level: 0 none, 1 LTV0, 2 frozen
+   * @return the current level: 0 none, 1 no LTV-bearing collateral path (whatever set it), 2 frozen
    */
   function getLevel(address asset) external view returns (uint256) {
     return _currentLevel(POOL.getReserveData(asset));

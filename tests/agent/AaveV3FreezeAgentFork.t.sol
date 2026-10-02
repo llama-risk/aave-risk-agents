@@ -2,9 +2,12 @@
 pragma solidity ^0.8.0;
 
 import {Test} from 'forge-std/Test.sol';
+import {IERC20} from 'forge-std/interfaces/IERC20.sol';
 import {TransparentUpgradeableProxy} from 'openzeppelin-contracts/contracts/proxy/transparent/TransparentUpgradeableProxy.sol';
-import {IPool, IACLManager} from 'aave-address-book/AaveV3.sol';
+import {IPool, IACLManager, IPoolConfigurator} from 'aave-address-book/AaveV3.sol';
+import {MiscEthereum} from 'aave-address-book/MiscEthereum.sol';
 import {AaveV3Ethereum, AaveV3EthereumAssets} from 'aave-address-book/AaveV3Ethereum.sol';
+import {AaveV3EthereumLido, AaveV3EthereumLidoAssets} from 'aave-address-book/AaveV3EthereumLido.sol';
 import {AaveV3EthereumHorizon, AaveV3EthereumHorizonAssets} from 'aave-address-book/AaveV3EthereumHorizon.sol';
 import {DataTypes} from 'aave-v3-origin/src/contracts/protocol/libraries/types/DataTypes.sol';
 import {ReserveConfiguration} from 'aave-v3-origin/src/contracts/protocol/libraries/configuration/ReserveConfiguration.sol';
@@ -15,6 +18,7 @@ import {AgentHub, IAgentHub} from 'chaos-agents/src/contracts/AgentHub.sol';
 import {IAgentConfigurator} from 'chaos-agents/src/interfaces/IAgentHub.sol';
 
 import {AaveV3FreezeAgent} from '../../src/contracts/agent/AaveV3FreezeAgent.sol';
+import {DeployV3FreezeAgent} from '../../scripts/AaveV3FreezeAgent.s.sol';
 
 abstract contract AaveV3FreezeAgentForkBase is Test {
   using ReserveConfiguration for DataTypes.ReserveConfigurationMap;
@@ -119,30 +123,44 @@ abstract contract AaveV3FreezeAgentForkBase is Test {
   }
 }
 
-abstract contract AaveV3FreezeAgentCoreForkBase is AaveV3FreezeAgentForkBase {
+abstract contract AaveV3FreezeAgentV37ForkBase is AaveV3FreezeAgentForkBase {
   using ReserveConfiguration for DataTypes.ReserveConfigurationMap;
 
+  IPool internal immutable POOL;
+  address internal immutable ACL_ADMIN;
+  IPoolConfigurator internal immutable CONFIGURATOR;
   address internal immutable ASSET;
+  uint256 internal immutable MIN_EMODES;
 
-  constructor(address asset) {
+  constructor(
+    IPool pool,
+    address aclAdmin,
+    IPoolConfigurator configurator,
+    address asset,
+    uint256 minEModes
+  ) {
+    POOL = pool;
+    ACL_ADMIN = aclAdmin;
+    CONFIGURATOR = configurator;
     ASSET = asset;
+    MIN_EMODES = minEModes;
   }
 
   function setUp() public {
-    _forkSetUp(26100000, AaveV3Ethereum.POOL, AaveV3Ethereum.ACL_ADMIN, ASSET);
+    _forkSetUp(26100000, POOL, ACL_ADMIN, ASSET);
   }
 
   function test_fork_configurator() public view {
-    assertEq(address(_agent.POOL_CONFIGURATOR()), address(AaveV3Ethereum.POOL_CONFIGURATOR));
+    assertEq(address(_agent.POOL_CONFIGURATOR()), address(CONFIGURATOR));
   }
 
   function test_fork_ltv0ThenFreeze() public {
     uint8[] memory eModes = _collateralEModes();
-    assertGt(eModes.length, 1);
+    assertGe(eModes.length, MIN_EMODES);
     uint256 ltv = _config().getLtv();
     uint256 lt = _config().getLiquidationThreshold();
     uint256 lb = _config().getLiquidationBonus();
-    uint256 pendingLtv = AaveV3Ethereum.POOL_CONFIGURATOR.getPendingLtv(_asset);
+    uint256 pendingLtv = CONFIGURATOR.getPendingLtv(_asset);
     assertEq(_agent.getLevel(_asset), 0);
 
     _publish(1);
@@ -154,7 +172,7 @@ abstract contract AaveV3FreezeAgentCoreForkBase is AaveV3FreezeAgentForkBase {
     assertEq(_config().getLiquidationThreshold(), lt);
     assertEq(_config().getLiquidationBonus(), lb);
     assertFalse(_config().getFrozen());
-    assertEq(AaveV3Ethereum.POOL_CONFIGURATOR.getPendingLtv(_asset), ltv == 0 ? pendingLtv : ltv);
+    assertEq(CONFIGURATOR.getPendingLtv(_asset), ltv == 0 ? pendingLtv : ltv);
     _assertEModesLtvzero(eModes);
     assertEq(_agent.getLevel(_asset), 1);
 
@@ -225,15 +243,39 @@ abstract contract AaveV3FreezeAgentCoreForkBase is AaveV3FreezeAgentForkBase {
 }
 
 contract AaveV3FreezeAgentCoreWeETHFork_Test is
-  AaveV3FreezeAgentCoreForkBase(AaveV3EthereumAssets.weETH_UNDERLYING)
+  AaveV3FreezeAgentV37ForkBase(
+    AaveV3Ethereum.POOL,
+    AaveV3Ethereum.ACL_ADMIN,
+    AaveV3Ethereum.POOL_CONFIGURATOR,
+    AaveV3EthereumAssets.weETH_UNDERLYING,
+    2
+  )
 {}
 
 contract AaveV3FreezeAgentCoreSUSDeFork_Test is
-  AaveV3FreezeAgentCoreForkBase(AaveV3EthereumAssets.sUSDe_UNDERLYING)
+  AaveV3FreezeAgentV37ForkBase(
+    AaveV3Ethereum.POOL,
+    AaveV3Ethereum.ACL_ADMIN,
+    AaveV3Ethereum.POOL_CONFIGURATOR,
+    AaveV3EthereumAssets.sUSDe_UNDERLYING,
+    2
+  )
+{}
+
+contract AaveV3FreezeAgentPrimeWstETHFork_Test is
+  AaveV3FreezeAgentV37ForkBase(
+    AaveV3EthereumLido.POOL,
+    AaveV3EthereumLido.ACL_ADMIN,
+    AaveV3EthereumLido.POOL_CONFIGURATOR,
+    AaveV3EthereumLidoAssets.wstETH_UNDERLYING,
+    1
+  )
 {}
 
 contract AaveV3FreezeAgentHorizonFork_Test is AaveV3FreezeAgentForkBase {
   using ReserveConfiguration for DataTypes.ReserveConfigurationMap;
+
+  address internal constant USTB_SUPPLIER = 0x81286ac163aD542A9a9C9e4C42F181B003443A22;
 
   function setUp() public {
     _forkSetUp(
@@ -267,5 +309,52 @@ contract AaveV3FreezeAgentHorizonFork_Test is AaveV3FreezeAgentForkBase {
 
     _publish(2);
     assertFalse(_execute());
+  }
+
+  function test_fork_freezeBlocksEModeBorrowPower() public {
+    uint8[] memory eModes = _collateralEModes();
+    assertGt(eModes.length, 0);
+    address user = USTB_SUPPLIER;
+    assertGt(IERC20(AaveV3EthereumHorizonAssets.USTB_A_TOKEN).balanceOf(user), 0);
+    vm.prank(user);
+    _pool.setUserEMode(eModes[0]);
+
+    (, , uint256 borrowsBefore, , , ) = _pool.getUserAccountData(user);
+    assertGt(borrowsBefore, 0);
+
+    _publish(2);
+    assertTrue(_execute());
+
+    (, , uint256 borrowsAfter, , , ) = _pool.getUserAccountData(user);
+    assertEq(borrowsAfter, 0);
+  }
+}
+
+contract AaveV3FreezeAgentDeployFork_Test is Test {
+  function setUp() public {
+    vm.createSelectFork(vm.rpcUrl('mainnet'), 26100000);
+  }
+
+  function test_fork_deployScript() public {
+    _check('_Core', address(AaveV3Ethereum.POOL), address(AaveV3Ethereum.POOL_CONFIGURATOR));
+    _check(
+      '_Prime',
+      address(AaveV3EthereumLido.POOL),
+      address(AaveV3EthereumLido.POOL_CONFIGURATOR)
+    );
+    _check(
+      '_Horizon',
+      address(AaveV3EthereumHorizon.POOL),
+      address(AaveV3EthereumHorizon.POOL_CONFIGURATOR)
+    );
+  }
+
+  function _check(string memory suffix, address pool, address configurator) internal {
+    AaveV3FreezeAgent agent = AaveV3FreezeAgent(
+      DeployV3FreezeAgent.deploy(MiscEthereum.AGENT_HUB, suffix, pool)
+    );
+    assertEq(agent.getUpdateType(), string.concat('ReserveFreezeUpdate', suffix));
+    assertEq(address(agent.POOL()), pool);
+    assertEq(address(agent.POOL_CONFIGURATOR()), configurator);
   }
 }
