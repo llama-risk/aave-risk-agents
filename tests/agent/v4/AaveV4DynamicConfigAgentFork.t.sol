@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.27;
 
+import {ERC20} from 'openzeppelin-contracts/contracts/token/ERC20/ERC20.sol';
 import {IAgentHub} from 'chaos-agents/src/contracts/AgentHub.sol';
 import {IRangeValidationModule} from 'chaos-agents/src/interfaces/IRangeValidationModule.sol';
 
@@ -11,6 +12,47 @@ import {IHub} from '../../../src/contracts/dependencies/v4/IHub.sol';
 import {ISpoke} from '../../../src/contracts/dependencies/v4/ISpoke.sol';
 import {ISpokeConfigurator} from '../../../src/contracts/dependencies/v4/ISpokeConfigurator.sol';
 import {AaveV4ForkTestBase, AaveV4BaseFork, IAccessManagerLike} from './AaveV4ForkTestBase.sol';
+
+contract EquityTokenMock is ERC20('', '') {
+  function decimals() public pure override returns (uint8) {
+    return 8;
+  }
+
+  function mint(address to, uint256 amount) external {
+    _mint(to, amount);
+  }
+}
+
+interface IVmEvmVersion {
+  function setEvmVersion(string calldata evm) external;
+}
+
+interface IHubLiquidity {
+  function getAssetLiquidity(uint256 assetId) external view returns (uint256);
+}
+
+interface ISpokeUser {
+  function supply(uint256 reserveId, uint256 amount, address onBehalfOf) external;
+
+  function borrow(uint256 reserveId, uint256 amount, address onBehalfOf) external;
+
+  function setUsingAsCollateral(
+    uint256 reserveId,
+    bool usingAsCollateral,
+    address onBehalfOf
+  ) external;
+
+  function getUserPosition(
+    uint256 reserveId,
+    address user
+  ) external view returns (uint120, uint120, int200, uint120, uint32 dynamicConfigKey);
+
+  function getLiquidationBonus(
+    uint256 reserveId,
+    address user,
+    uint256 healthFactor
+  ) external view returns (uint256);
+}
 
 abstract contract AaveV4DynamicConfigAgentForkTestBase is AaveV4ForkTestBase {
   address internal constant HUB = AaveV4BaseFork.EQUITIES_HUB;
@@ -203,6 +245,28 @@ abstract contract AaveV4DynamicConfigAgentForkTestBase is AaveV4ForkTestBase {
   function _latest(address asset) internal view returns (ISpoke.DynamicReserveConfig memory) {
     return _key(asset, _lastKey(asset));
   }
+
+  function _openPosition(address user) internal {
+    // v4 user flows need cancun, and revm cannot run the native AAPLc token.
+    IVmEvmVersion(address(vm)).setEvmVersion('cancun');
+    vm.etch(AAPL, address(new EquityTokenMock()).code);
+    uint256 amount = 10e8;
+    EquityTokenMock(AAPL).mint(
+      HUB,
+      IHubLiquidity(HUB).getAssetLiquidity(IHub(HUB).getAssetId(AAPL))
+    );
+    EquityTokenMock(AAPL).mint(user, amount);
+    vm.startPrank(user);
+    EquityTokenMock(AAPL).approve(SPOKE, amount);
+    ISpokeUser(SPOKE).supply(_reserveIdOf(AAPL), amount, user);
+    ISpokeUser(SPOKE).setUsingAsCollateral(_reserveIdOf(AAPL), true, user);
+    ISpokeUser(SPOKE).borrow(_reserveIdOf(USDC), 100e6, user);
+    vm.stopPrank();
+  }
+
+  function _positionKey(address user) internal view returns (uint32 key) {
+    (, , , , key) = ISpokeUser(SPOKE).getUserPosition(_reserveIdOf(AAPL), user);
+  }
 }
 
 contract AaveV4DynamicConfigAgentLB_BaseForkTest is
@@ -266,6 +330,17 @@ contract AaveV4DynamicConfigAgentLB_BaseForkTest is
     assertEq(_key(AAPL, 1).maxLiquidationBonus, lb);
   }
 
+  function test_lb_reachesOpenPosition() public {
+    address user = makeAddr('user');
+    _openPosition(user);
+    assertEq(_positionKey(user), 0);
+
+    uint256 lb = _latest(AAPL).maxLiquidationBonus + 1_00;
+    _publish(HUB, SPOKE, AAPL, abi.encode(lb));
+    assertTrue(_checkAndExecute());
+    assertEq(ISpokeUser(SPOKE).getLiquidationBonus(_reserveIdOf(AAPL), user, 0), lb);
+  }
+
   function test_lb_rejectsBandRangeAndNoop() public {
     uint32 current = _latest(AAPL).maxLiquidationBonus;
     _publish(HUB, SPOKE, AAPL, abi.encode(uint256(current + 2_01)));
@@ -302,6 +377,22 @@ contract AaveV4DynamicConfigAgentCF_BaseForkTest is
     assertEq(_key(AAPL, 1).collateralFactor, cf);
     assertEq(_key(AAPL, 1).maxLiquidationBonus, base.maxLiquidationBonus);
     assertEq(_key(AAPL, 1).liquidationFee, base.liquidationFee);
+  }
+
+  function test_cf_existingPositionKeepsKeyUntilBorrow() public {
+    address user = makeAddr('user');
+    _openPosition(user);
+    assertEq(_positionKey(user), 0);
+
+    _publish(HUB, SPOKE, AAPL, _validValue(AAPL));
+    assertTrue(_checkAndExecute());
+    assertEq(_lastKey(AAPL), 1);
+    assertEq(_positionKey(user), 0);
+
+    uint256 usdcReserveId = _reserveIdOf(USDC);
+    vm.prank(user);
+    ISpokeUser(SPOKE).borrow(usdcReserveId, 1e6, user);
+    assertEq(_positionKey(user), 1);
   }
 
   function test_cf_rejectsBandAndRange() public {

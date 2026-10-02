@@ -4,6 +4,8 @@ pragma solidity ^0.8.27;
 import {RangeValidationModule, IRangeValidationModule} from 'chaos-agents/src/contracts/modules/RangeValidationModule.sol';
 import {IAgentConfigurator} from 'chaos-agents/src/interfaces/IAgentHub.sol';
 import {IRiskOracle} from 'chaos-agents/src/contracts/dependencies/IRiskOracle.sol';
+import {IAccessManaged} from '../../../src/contracts/dependencies/v4/IAccessManaged.sol';
+import {IAccessManager} from '../../../src/contracts/dependencies/v4/IAccessManager.sol';
 import {BaseAgentTest} from 'chaos-agents/tests/agent/BaseAgentTest.sol';
 
 import {BaseAaveV4Agent} from '../../../src/contracts/agent/v4/BaseAaveV4Agent.sol';
@@ -168,6 +170,10 @@ abstract contract AaveV4DynamicConfigAgentTestBase is BaseAgentTest {
   }
 
   function test_tightenBand_unsetBand() public {
+    _agentHub.addAllowedMarket(
+      _agentId,
+      _dynamicAgent.marketId(address(_hub), address(_spoke), OTHER_ASSET)
+    );
     vm.expectRevert(AaveV4DynamicConfigAgent.InvalidBand.selector);
     _dynamicAgent.tightenBand(
       _agentId,
@@ -194,6 +200,28 @@ abstract contract AaveV4DynamicConfigAgentTestBase is BaseAgentTest {
     _tightenBand(otherAgentId, AaveV4DynamicConfigAgent.Field.LB, 102_00, 110_00);
   }
 
+  function test_tightenBand_marketNotAllowedForAgentId() public {
+    uint256 otherAgentId = _registerOther(address(_dynamicAgent));
+    _agentHub.removeAllowedMarket(otherAgentId, _market);
+    _agentHub.setAgentAdmin(otherAgentId, ADMIN);
+    vm.prank(ADMIN);
+    vm.expectRevert(abi.encodeWithSelector(AaveV4DynamicConfigAgent.Unauthorized.selector, ADMIN));
+    _tightenBand(otherAgentId, AaveV4DynamicConfigAgent.Field.LB, 101_00, 101_00);
+  }
+
+  function test_tightenBand_disabledAgentId() public {
+    uint256 otherAgentId = _registerOther(address(_dynamicAgent));
+    _agentHub.setAgentEnabled(otherAgentId, false);
+    _agentHub.setAgentAdmin(otherAgentId, ADMIN);
+    vm.prank(ADMIN);
+    vm.expectRevert(abi.encodeWithSelector(AaveV4DynamicConfigAgent.Unauthorized.selector, ADMIN));
+    _tightenBand(otherAgentId, AaveV4DynamicConfigAgent.Field.LB, 101_00, 101_00);
+
+    _agentHub.setAgentEnabled(otherAgentId, true);
+    vm.prank(ADMIN);
+    _tightenBand(otherAgentId, AaveV4DynamicConfigAgent.Field.LB, 101_00, 101_00);
+  }
+
   function test_setMinLiveKey() public {
     _spoke.setKey(RESERVE_ID, 2, _config(CF, LB));
     vm.expectEmit(address(_dynamicAgent));
@@ -201,10 +229,32 @@ abstract contract AaveV4DynamicConfigAgentTestBase is BaseAgentTest {
     _setMinLiveKey(_agentId, 2);
     assertEq(_dynamicAgent.minLiveKey(_market), 2);
 
-    _agentHub.setAgentAdmin(_agentId, ADMIN);
-    vm.prank(ADMIN);
     _setMinLiveKey(_agentId, 1);
     assertEq(_dynamicAgent.minLiveKey(_market), 1);
+
+    _agentHub.setAgentAdmin(_agentId, ADMIN);
+    vm.prank(ADMIN);
+    _setMinLiveKey(_agentId, 2);
+    assertEq(_dynamicAgent.minLiveKey(_market), 2);
+  }
+
+  function test_setMinLiveKey_adminCannotLower() public {
+    _spoke.setKey(RESERVE_ID, 2, _config(CF, LB));
+    _setMinLiveKey(_agentId, 2);
+    _agentHub.setAgentAdmin(_agentId, ADMIN);
+    vm.prank(ADMIN);
+    vm.expectRevert(AaveV4DynamicConfigAgent.InvalidKey.selector);
+    _setMinLiveKey(_agentId, 1);
+  }
+
+  function test_setMinLiveKey_marketNotAllowedForAgentId() public {
+    _spoke.setKey(RESERVE_ID, 1, _config(CF, LB));
+    uint256 otherAgentId = _registerOther(address(_dynamicAgent));
+    _agentHub.removeAllowedMarket(otherAgentId, _market);
+    _agentHub.setAgentAdmin(otherAgentId, ADMIN);
+    vm.prank(ADMIN);
+    vm.expectRevert(abi.encodeWithSelector(AaveV4DynamicConfigAgent.Unauthorized.selector, ADMIN));
+    _setMinLiveKey(otherAgentId, 1);
   }
 
   function test_setMinLiveKey_unauthorized(address caller) public {
@@ -247,6 +297,28 @@ abstract contract AaveV4DynamicConfigAgentTestBase is BaseAgentTest {
     assertFalse(_validate(_validValue()));
     _accessManager.setCanCall(address(_configurator), address(_spoke), _spokeSelector(), false, 0);
     assertFalse(_validate(_validValue()));
+  }
+
+  function test_validate_spokeAuthorityMalformed() public {
+    bytes memory authorityCall = abi.encodeCall(IAccessManaged.authority, ());
+    vm.mockCall(address(_spoke), authorityCall, hex'01');
+    assertFalse(_validate(_validValue()));
+    vm.mockCall(address(_spoke), authorityCall, abi.encode(type(uint256).max));
+    assertFalse(_validate(_validValue()));
+    vm.mockCall(address(_spoke), authorityCall, abi.encode(address(0xBEEF)));
+    assertFalse(_validate(_validValue()));
+    vm.clearMockedCalls();
+
+    bytes memory canCall = abi.encodeCall(
+      IAccessManager.canCall,
+      (address(_configurator), address(_spoke), _spokeSelector())
+    );
+    vm.mockCall(address(_accessManager), canCall, abi.encode(true));
+    assertFalse(_validate(_validValue()));
+    vm.mockCall(address(_accessManager), canCall, abi.encode(uint256(2), uint256(0)));
+    assertFalse(_validate(_validValue()));
+    vm.clearMockedCalls();
+    assertTrue(_validate(_validValue()));
   }
 
   function test_validate_unlistedAsset() public view {
@@ -512,10 +584,28 @@ contract AaveV4DynamicConfigAgentLB_Test is
     assertTrue(_validate(abi.encode(uint256(LB - 1_00))));
   }
 
-  function test_lb_rangeCheckedOnEveryKey() public {
+  function test_lb_rangeCheckedAgainstLatestKey() public {
     _spoke.setKey(RESERVE_ID, 1, _config(CF, 103_00));
-    assertFalse(_validate(abi.encode(uint256(106_00))));
+    assertFalse(_validate(abi.encode(uint256(105_01))));
+    assertFalse(_validate(abi.encode(uint256(101_99))));
     assertTrue(_validate(abi.encode(uint256(105_00))));
+    assertTrue(_validate(abi.encode(uint256(102_00))));
+  }
+
+  function test_lb_divergentKeysDoNotStall() public {
+    _spoke.setKey(RESERVE_ID, 1, _config(CF, 110_00));
+    _publish(abi.encode(uint256(111_00)));
+    assertTrue(_checkAndPerformAutomation(_agentId));
+    assertEq(_key(0).maxLiquidationBonus, 111_00);
+    assertEq(_key(1).maxLiquidationBonus, 111_00);
+  }
+
+  function test_lb_latestAtTargetAlignsOlderKeys() public {
+    _spoke.setKey(RESERVE_ID, 1, _config(CF, 110_00));
+    _publish(abi.encode(uint256(110_00)));
+    assertTrue(_checkAndPerformAutomation(_agentId));
+    assertEq(_configurator.calls(), 1);
+    assertEq(_key(0).maxLiquidationBonus, 110_00);
   }
 
   function test_lb_unsafeOnAnyKey() public {
