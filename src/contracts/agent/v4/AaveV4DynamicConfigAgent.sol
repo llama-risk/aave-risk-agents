@@ -7,8 +7,6 @@ import {IAgentConfigurator} from 'chaos-agents/src/interfaces/IAgentConfigurator
 import {IRiskOracle} from 'chaos-agents/src/contracts/dependencies/IRiskOracle.sol';
 import {IOwnable} from 'chaos-agents/src/contracts/dependencies/IOwnable.sol';
 
-import {IAccessManaged} from '../../dependencies/v4/IAccessManaged.sol';
-import {IAccessManager} from '../../dependencies/v4/IAccessManager.sol';
 import {ISpoke} from '../../dependencies/v4/ISpoke.sol';
 import {ISpokeConfigurator} from '../../dependencies/v4/ISpokeConfigurator.sol';
 import {BaseAaveV4Agent} from './BaseAaveV4Agent.sol';
@@ -149,12 +147,9 @@ contract AaveV4DynamicConfigAgent is BaseAaveV4Agent {
     bool isOwner = msg.sender == IOwnable(AGENT_HUB).owner();
     require(isOwner || _isAgentAdmin(agentId, msg.sender, market), Unauthorized(msg.sender));
     (bool listed, , uint256 reserveId) = _reserveId(hub, spoke, asset);
-    require(
-      listed &&
-        key <= ISpoke(spoke).getReserve(reserveId).dynamicConfigKey &&
-        (isOwner || key >= minLiveKey[market]),
-      InvalidKey()
-    );
+    uint32 lastKey;
+    if (listed) (listed, lastKey) = _dynamicConfigKey(spoke, reserveId);
+    require(listed && key <= lastKey && (isOwner || key >= minLiveKey[market]), InvalidKey());
     minLiveKey[market] = key;
     emit MinLiveKeySet(market, key);
   }
@@ -239,17 +234,29 @@ contract AaveV4DynamicConfigAgent is BaseAaveV4Agent {
   ) internal view returns (bool, Target memory target) {
     bool listed;
     (listed, , target.reserveId) = _reserveId(market.hub, market.spoke, market.asset);
-    if (!listed || !_spokeAcceptsConfigurator(market.spoke)) return (false, target);
+    if (
+      !listed ||
+      !_configuratorCanCall(
+        market.spoke,
+        MODE == Mode.LB_IN_PLACE
+          ? ISpoke.updateDynamicReserveConfig.selector
+          : ISpoke.addDynamicReserveConfig.selector
+      )
+    ) {
+      return (false, target);
+    }
 
-    ISpoke spoke = ISpoke(market.spoke);
     target.market = id;
     target.spoke = market.spoke;
-    target.lastKey = spoke.getReserve(target.reserveId).dynamicConfigKey;
-    target.latest = spoke.getDynamicReserveConfig(target.reserveId, target.lastKey);
-    return (
-      !spoke.getReserveConfig(target.reserveId).frozen && target.latest.collateralFactor != 0,
-      target
+    bool ok;
+    (ok, target.lastKey, target.latest) = _latestDynamicReserveConfig(
+      market.spoke,
+      target.reserveId
     );
+    if (!ok || target.latest.collateralFactor == 0) return (false, target);
+    ISpoke.ReserveConfig memory config;
+    (ok, config) = _reserveConfig(market.spoke, target.reserveId);
+    return (ok && !config.frozen, target);
   }
 
   function _liveKeyUpdates(
@@ -274,10 +281,12 @@ contract AaveV4DynamicConfigAgent is BaseAaveV4Agent {
     keys = new uint32[](target.lastKey - first + 1);
     uint256 count;
     for (uint256 key = first; key <= target.lastKey; key++) {
-      ISpoke.DynamicReserveConfig memory config = ISpoke(target.spoke).getDynamicReserveConfig(
+      (bool read, ISpoke.DynamicReserveConfig memory config) = _dynamicReserveConfig(
+        target.spoke,
         target.reserveId,
         uint32(key)
       );
+      if (!read) return (new uint32[](0), inputs);
       // Keys with CF 0 cannot be updated on v4 and positions bound to them cannot be liquidated.
       if (config.collateralFactor == 0 || config.maxLiquidationBonus == lb) continue;
       if (!_isSafe(config.collateralFactor, lb)) return (new uint32[](0), inputs);
@@ -357,29 +366,6 @@ contract AaveV4DynamicConfigAgent is BaseAaveV4Agent {
       lb * cf <= (PERCENTAGE_FACTOR - 1) * PERCENTAGE_FACTOR;
   }
 
-  function _spokeAcceptsConfigurator(address spoke) internal view returns (bool ok) {
-    bytes memory authorityCall = abi.encodeCall(IAccessManaged.authority, ());
-    bytes memory canCall = abi.encodeCall(
-      IAccessManager.canCall,
-      (
-        CONFIGURATOR,
-        spoke,
-        MODE == Mode.LB_IN_PLACE
-          ? ISpoke.updateDynamicReserveConfig.selector
-          : ISpoke.addDynamicReserveConfig.selector
-      )
-    );
-    assembly ('memory-safe') {
-      ok := staticcall(gas(), spoke, add(authorityCall, 0x20), mload(authorityCall), 0x00, 0x20)
-      let authority := mload(0x00)
-      ok := and(and(ok, eq(returndatasize(), 0x20)), iszero(shr(160, authority)))
-      if ok {
-        ok := staticcall(gas(), authority, add(canCall, 0x20), mload(canCall), 0x00, 0x40)
-        ok := and(and(ok, eq(returndatasize(), 0x40)), and(eq(mload(0x00), 1), iszero(mload(0x20))))
-      }
-    }
-  }
-
   function _isAgentAdmin(
     uint256 agentId,
     address account,
@@ -393,11 +379,7 @@ contract AaveV4DynamicConfigAgent is BaseAaveV4Agent {
     ) {
       return false;
     }
-    address[] memory markets = hub.getAllowedMarkets(agentId);
-    for (uint256 i = 0; i < markets.length; i++) {
-      if (markets[i] == market) return true;
-    }
-    return false;
+    return _contains(hub.getAllowedMarkets(agentId), market);
   }
 
   function _setBand(address market, Field field, uint32 min, uint32 max) internal {

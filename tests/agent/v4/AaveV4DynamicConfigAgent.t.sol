@@ -321,6 +321,29 @@ abstract contract AaveV4DynamicConfigAgentTestBase is BaseAgentTest {
     assertTrue(_validate(_validValue()));
   }
 
+  function test_validate_spokeReadsFail() public {
+    bytes[3] memory calls = [
+      abi.encodeCall(ISpoke.getReserve, (RESERVE_ID)),
+      abi.encodeCall(ISpoke.getDynamicReserveConfig, (RESERVE_ID, 0)),
+      abi.encodeCall(ISpoke.getReserveConfig, (RESERVE_ID))
+    ];
+    for (uint256 i = 0; i < calls.length; i++) {
+      vm.mockCallRevert(address(_spoke), calls[i], '');
+      assertFalse(_validate(_validValue()));
+      vm.mockCall(address(_spoke), calls[i], hex'01');
+      assertFalse(_validate(_validValue()));
+      vm.clearMockedCalls();
+    }
+    vm.mockCall(
+      address(_spoke),
+      calls[1],
+      abi.encode(uint256(CF), uint256(type(uint32).max) + 1, uint256(0))
+    );
+    assertFalse(_validate(_validValue()));
+    vm.clearMockedCalls();
+    assertTrue(_validate(_validValue()));
+  }
+
   function test_validate_unlistedAsset() public view {
     address market = _dynamicAgent.marketId(address(_hub), address(_spoke), OTHER_ASSET);
     assertFalse(
@@ -590,6 +613,17 @@ contract AaveV4DynamicConfigAgentLB_Test is
     assertFalse(_validate(abi.encode(uint256(101_99))));
     assertTrue(_validate(abi.encode(uint256(105_00))));
     assertTrue(_validate(abi.encode(uint256(102_00))));
+  }
+
+  function test_lb_olderKeyReadFails() public {
+    _spoke.setKey(RESERVE_ID, 1, _config(CF, LB));
+    assertTrue(_validate(_validValue()));
+    vm.mockCallRevert(
+      address(_spoke),
+      abi.encodeCall(ISpoke.getDynamicReserveConfig, (RESERVE_ID, 0)),
+      ''
+    );
+    assertFalse(_validate(_validValue()));
   }
 
   function test_lb_divergentKeysDoNotStall() public {
