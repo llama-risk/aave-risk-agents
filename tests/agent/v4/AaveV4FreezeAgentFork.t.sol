@@ -33,8 +33,15 @@ interface ISpokeActions {
   error ReserveFrozen();
   error HealthFactorBelowThreshold();
   error CannotReceiveShares();
+  error ReserveNotEnabledAsCollateral();
 
   function supply(uint256 reserveId, uint256 amount, address onBehalfOf) external;
+
+  function setUsingAsCollateral(
+    uint256 reserveId,
+    bool usingAsCollateral,
+    address onBehalfOf
+  ) external;
 
   function borrow(uint256 reserveId, uint256 amount, address onBehalfOf) external;
 
@@ -255,6 +262,69 @@ contract AaveV4FreezeAgent_BaseForkTest is AaveV4ForkTestBase('FreezeUpdate_MAG7
     );
   }
 
+  function test_validate_falseWhenConfiguratorLosesSpokeRole() public {
+    _revokeRole(SPOKE, ISpoke.addDynamicReserveConfig.selector, AaveV4BaseFork.SPOKE_CONFIGURATOR);
+    _publish(HUB, SPOKE, AAPLc, abi.encode(uint256(1)));
+    _publish(HUB, SPOKE, AaveV4BaseFork.NVDAc, abi.encode(uint256(2)));
+    _publish(HUB, SPOKE, USDC, abi.encode(uint256(2)));
+
+    (bool shouldRun, ) = _check();
+    assertFalse(shouldRun);
+  }
+
+  function test_minimumDelay_holdsEscalation() public {
+    _agentHub.setMinimumDelay(_agentId, 1 hours);
+    _publish(HUB, SPOKE, AAPLc, abi.encode(uint256(1)));
+    assertTrue(_checkAndExecute());
+
+    vm.warp(block.timestamp + 30 minutes);
+    _publish(HUB, SPOKE, AAPLc, abi.encode(uint256(2)));
+    (bool shouldRun, ) = _check();
+    assertFalse(shouldRun);
+
+    vm.warp(block.timestamp + 30 minutes);
+    assertTrue(_checkAndExecute());
+    assertTrue(ISpoke(SPOKE).getReserveConfig(_reserveIdOf(AAPLc)).frozen);
+  }
+
+  function test_guardianUndo_needsMarketRemoval() public {
+    uint256 reserveId = _reserveIdOf(AAPLc);
+    ISpoke.DynamicReserveConfig memory original = ISpoke(SPOKE).getDynamicReserveConfig(
+      reserveId,
+      ISpoke(SPOKE).getReserve(reserveId).dynamicConfigKey
+    );
+    _publish(HUB, SPOKE, AAPLc, abi.encode(uint256(2)));
+    assertTrue(_checkAndExecute());
+
+    address guardian = makeAddr('guardian');
+    _grantRole(
+      AaveV4BaseFork.SPOKE_CONFIGURATOR,
+      ISpokeConfigurator.addDynamicReserveConfig.selector,
+      guardian
+    );
+    _grantRole(
+      AaveV4BaseFork.SPOKE_CONFIGURATOR,
+      ISpokeConfigurator.updateFrozen.selector,
+      guardian
+    );
+    vm.startPrank(guardian);
+    ISpokeConfigurator(AaveV4BaseFork.SPOKE_CONFIGURATOR).addDynamicReserveConfig(
+      SPOKE,
+      reserveId,
+      original
+    );
+    ISpokeConfigurator(AaveV4BaseFork.SPOKE_CONFIGURATOR).updateFrozen(SPOKE, reserveId, false);
+    vm.stopPrank();
+
+    _publish(HUB, SPOKE, AAPLc, abi.encode(uint256(2)));
+    (bool shouldRun, ) = _check();
+    assertTrue(shouldRun);
+
+    _agentHub.removeAllowedMarket(_agentId, _marketId(HUB, SPOKE, AAPLc));
+    (shouldRun, ) = _check();
+    assertFalse(shouldRun);
+  }
+
   function test_agent_callsOnlyEscalationSelectors() public view {
     assertTrue(_hasSelector(_agent, ISpokeConfigurator.addCollateralFactor.selector));
     assertTrue(_hasSelector(_agent, ISpokeConfigurator.freezeReserve.selector));
@@ -310,6 +380,165 @@ contract AaveV4FreezeAgent_BaseForkTest is AaveV4ForkTestBase('FreezeUpdate_MAG7
     );
     vm.stopPrank();
     assertLt(ISpokeActions(SPOKE).getUserAccountData(BORROWER).totalDebtValueRay, debtBefore);
+  }
+
+  function _reserveIdOf(address asset) internal view returns (uint256) {
+    return ISpoke(SPOKE).getReserveId(HUB, IHub(HUB).getAssetId(asset));
+  }
+}
+
+contract AaveV4FreezeAgent_EthereumForkTest is AaveV4ForkTestBase('FreezeUpdate_Bluechip') {
+  uint256 internal constant BLOCK = 26100000;
+  address internal constant ACCESS_MANAGER = 0x08aE3BE30958cDd1847ec58fFfd4C451a87fDF01;
+  address internal constant SPOKE_CONFIGURATOR = 0x9BFFf48BFb5A7AE70c348d4d4cb97E8DEFa5389a;
+  address internal constant HUB = 0x943827DCA022D0F354a8a8c332dA1e5Eb9f9F931;
+  address internal constant SPOKE = 0x973a023A77420ba610f06b3858aD991Df6d85A08;
+  address internal constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
+  address internal constant WBTC = 0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599;
+  address internal constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
+
+  AaveV4FreezeAgent internal _freezeAgent;
+  address internal _user = makeAddr('user');
+  address internal _liquidator = makeAddr('liquidator');
+
+  function _createFork() internal override {
+    vm.createSelectFork(vm.rpcUrl('mainnet'), BLOCK);
+  }
+
+  function _accessManager() internal pure override returns (address) {
+    return ACCESS_MANAGER;
+  }
+
+  function _deployAgent() internal override returns (address) {
+    _freezeAgent = new AaveV4FreezeAgent(
+      address(_agentHub),
+      address(_rangeValidationModule),
+      '_Bluechip',
+      SPOKE_CONFIGURATOR
+    );
+    return address(_freezeAgent);
+  }
+
+  function _allowedMarkets() internal pure override returns (address[] memory markets) {
+    markets = new address[](2);
+    markets[0] = _marketId(HUB, SPOKE, WETH);
+    markets[1] = _marketId(HUB, SPOKE, WBTC);
+  }
+
+  function _postSetup() internal override {
+    vm.setEvmVersion('cancun');
+    _agentHub.setMinimumDelay(_agentId, 0);
+    _grantRole(SPOKE_CONFIGURATOR, ISpokeConfigurator.addCollateralFactor.selector, _agent);
+    _grantRole(SPOKE_CONFIGURATOR, ISpokeConfigurator.freezeReserve.selector, _agent);
+  }
+
+  function test_ltv0_untouchedPositionStaysLiquidatable() public {
+    uint256 wethId = _reserveIdOf(WETH);
+    uint256 usdcId = _reserveIdOf(USDC);
+    _openPosition(wethId, 1e18, 1_000e6);
+    uint32 key = ISpoke(SPOKE).getReserve(wethId).dynamicConfigKey;
+    uint256 healthFactor = ISpokeActions(SPOKE).getUserAccountData(_user).healthFactor;
+
+    _publish(HUB, SPOKE, WETH, abi.encode(uint256(1)));
+    assertTrue(_checkAndExecute());
+
+    assertEq(ISpoke(SPOKE).getReserve(wethId).dynamicConfigKey, key + 1);
+    assertEq(ISpoke(SPOKE).getDynamicReserveConfig(wethId, key + 1).collateralFactor, 0);
+    assertFalse(ISpoke(SPOKE).getReserveConfig(wethId).frozen);
+    assertEq(ISpokeActions(SPOKE).getUserAccountData(_user).healthFactor, healthFactor);
+
+    vm.prank(_user);
+    vm.expectRevert(ISpokeActions.HealthFactorBelowThreshold.selector);
+    ISpokeActions(SPOKE).borrow(usdcId, 1e6, _user);
+
+    _dropPrice(wethId, 1_000);
+    _liquidate(wethId, usdcId);
+  }
+
+  function test_freeze_blocksSupplyAndKeepsLiquidations() public {
+    uint256 wethId = _reserveIdOf(WETH);
+    uint256 usdcId = _reserveIdOf(USDC);
+    _openPosition(wethId, 1e18, 1_000e6);
+
+    _publish(HUB, SPOKE, WETH, abi.encode(uint256(2)));
+    assertTrue(_checkAndExecute());
+    assertTrue(ISpoke(SPOKE).getReserveConfig(wethId).frozen);
+
+    deal(WETH, _user, 1e18);
+    vm.startPrank(_user);
+    IERC20(WETH).approve(SPOKE, 1e18);
+    vm.expectRevert(ISpokeActions.ReserveFrozen.selector);
+    ISpokeActions(SPOKE).supply(wethId, 1e18, _user);
+    vm.stopPrank();
+
+    _dropPrice(wethId, 1_000);
+    _liquidate(wethId, usdcId);
+  }
+
+  function test_ltv0_refreshedPositionLosesSeizability() public {
+    uint256 wethId = _reserveIdOf(WETH);
+    uint256 wbtcId = _reserveIdOf(WBTC);
+    uint256 usdcId = _reserveIdOf(USDC);
+    _openPosition(wethId, 1e18, 1_000e6);
+    _supplyCollateral(wbtcId, WBTC, 1e8);
+
+    _publish(HUB, SPOKE, WETH, abi.encode(uint256(1)));
+    assertTrue(_checkAndExecute());
+
+    vm.prank(_user);
+    ISpokeActions(SPOKE).borrow(usdcId, 1e6, _user);
+    assertEq(
+      ISpokeActions(SPOKE).getUserPosition(wethId, _user).dynamicConfigKey,
+      ISpoke(SPOKE).getReserve(wethId).dynamicConfigKey
+    );
+
+    _dropPrice(wbtcId, 1_000);
+    assertLt(ISpokeActions(SPOKE).getUserAccountData(_user).healthFactor, 1e18);
+    deal(USDC, _liquidator, 100e6);
+    vm.startPrank(_liquidator);
+    IERC20(USDC).approve(SPOKE, type(uint256).max);
+    vm.expectRevert(ISpokeActions.ReserveNotEnabledAsCollateral.selector);
+    ISpokeActions(SPOKE).liquidationCall(wethId, usdcId, _user, 100e6, false);
+    vm.stopPrank();
+
+    _liquidate(wbtcId, usdcId);
+  }
+
+  function _openPosition(uint256 reserveId, uint256 amount, uint256 debt) internal {
+    _supplyCollateral(reserveId, WETH, amount);
+    uint256 usdcId = _reserveIdOf(USDC);
+    vm.prank(_user);
+    ISpokeActions(SPOKE).borrow(usdcId, debt, _user);
+  }
+
+  function _supplyCollateral(uint256 reserveId, address asset, uint256 amount) internal {
+    deal(asset, _user, amount);
+    vm.startPrank(_user);
+    IERC20(asset).approve(SPOKE, amount);
+    ISpokeActions(SPOKE).supply(reserveId, amount, _user);
+    ISpokeActions(SPOKE).setUsingAsCollateral(reserveId, true, _user);
+    vm.stopPrank();
+  }
+
+  function _dropPrice(uint256 reserveId, uint256 divisor) internal {
+    address oracle = ISpoke(SPOKE).ORACLE();
+    uint256 price = IAaveOracle(oracle).getReservePrice(reserveId);
+    vm.mockCall(
+      oracle,
+      abi.encodeCall(IAaveOracle.getReservePrice, (reserveId)),
+      abi.encode(price / divisor)
+    );
+  }
+
+  function _liquidate(uint256 collateralReserveId, uint256 debtReserveId) internal {
+    assertLt(ISpokeActions(SPOKE).getUserAccountData(_user).healthFactor, 1e18);
+    uint256 debtBefore = ISpokeActions(SPOKE).getUserAccountData(_user).totalDebtValueRay;
+    deal(USDC, _liquidator, 100e6);
+    vm.startPrank(_liquidator);
+    IERC20(USDC).approve(SPOKE, type(uint256).max);
+    ISpokeActions(SPOKE).liquidationCall(collateralReserveId, debtReserveId, _user, 100e6, false);
+    vm.stopPrank();
+    assertLt(ISpokeActions(SPOKE).getUserAccountData(_user).totalDebtValueRay, debtBefore);
   }
 
   function _reserveIdOf(address asset) internal view returns (uint256) {

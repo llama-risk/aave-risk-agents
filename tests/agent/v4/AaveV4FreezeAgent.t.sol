@@ -28,6 +28,8 @@ contract AaveV4FreezeAgent_Test is BaseAgentTest('FreezeUpdate_MAG7') {
   uint32 internal constant KEY = 7;
   bytes4 internal constant ADD_CF = ISpokeConfigurator.addCollateralFactor.selector;
   bytes4 internal constant FREEZE = ISpokeConfigurator.freezeReserve.selector;
+  bytes4 internal constant SPOKE_ADD = ISpoke.addDynamicReserveConfig.selector;
+  bytes4 internal constant SPOKE_UPDATE = ISpoke.updateReserveConfig.selector;
 
   address internal _market;
 
@@ -42,6 +44,9 @@ contract AaveV4FreezeAgent_Test is BaseAgentTest('FreezeUpdate_MAG7') {
     _hub.listSpoke(ASSET_ID, address(_spoke));
     _spoke.addReserve(address(_hub), ASSET_ID, RESERVE_ID);
     _spoke.setDynamicConfig(RESERVE_ID, KEY, _config(70_00, 105_00, 10_00));
+    _spoke.setAuthority(address(_accessManager));
+    _accessManager.setCanCall(address(_configurator), address(_spoke), SPOKE_ADD, true, 0);
+    _accessManager.setCanCall(address(_configurator), address(_spoke), SPOKE_UPDATE, true, 0);
 
     _freezeAgent = new AaveV4FreezeAgent(
       address(_agentHub),
@@ -183,6 +188,39 @@ contract AaveV4FreezeAgent_Test is BaseAgentTest('FreezeUpdate_MAG7') {
     assertFalse(_validate(2));
 
     _accessManager.setCanCall(address(_freezeAgent), address(_configurator), ADD_CF, true, 1);
+    assertFalse(_validate(1));
+  }
+
+  function test_validate_configuratorSpokeRoles() public {
+    _accessManager.setCanCall(address(_configurator), address(_spoke), SPOKE_UPDATE, false, 0);
+    assertTrue(_validate(1));
+    assertFalse(_validate(2));
+
+    _accessManager.setCanCall(address(_configurator), address(_spoke), SPOKE_UPDATE, true, 1);
+    assertFalse(_validate(2));
+
+    _accessManager.setCanCall(address(_configurator), address(_spoke), SPOKE_UPDATE, true, 0);
+    _accessManager.setCanCall(address(_configurator), address(_spoke), SPOKE_ADD, false, 0);
+    assertFalse(_validate(1));
+    assertFalse(_validate(2));
+
+    _spoke.setDynamicConfig(RESERVE_ID, KEY, _config(0, 105_00, 10_00));
+    assertTrue(_validate(2));
+  }
+
+  function test_validate_spokeAuthority() public {
+    AccessManagerMock other = new AccessManagerMock();
+    _spoke.setAuthority(address(other));
+    assertFalse(_validate(1));
+    assertFalse(_validate(2));
+
+    other.setCanCall(address(_configurator), address(_spoke), SPOKE_ADD, true, 0);
+    other.setCanCall(address(_configurator), address(_spoke), SPOKE_UPDATE, true, 0);
+    assertTrue(_validate(2));
+
+    _spoke.setAuthority(address(0));
+    assertFalse(_validate(1));
+    _spoke.setAuthority(address(0xdead));
     assertFalse(_validate(1));
   }
 

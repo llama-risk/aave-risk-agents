@@ -5,6 +5,7 @@ import {ISpoke} from '../../../../src/contracts/dependencies/v4/ISpoke.sol';
 import {ConfiguratorMock, SpokeMock} from './AaveV4Mocks.sol';
 
 contract FreezeSpokeMock is SpokeMock {
+  address public authority;
   mapping(uint256 => uint32) internal _latestKeys;
   mapping(uint256 => mapping(uint32 => ISpoke.DynamicReserveConfig)) internal _dynamicConfigs;
 
@@ -15,6 +16,10 @@ contract FreezeSpokeMock is SpokeMock {
   ) external {
     _latestKeys[reserveId] = key;
     _dynamicConfigs[reserveId][key] = config;
+  }
+
+  function setAuthority(address authority_) external {
+    authority = authority_;
   }
 
   function setFrozen(uint256 reserveId, bool frozen) external {

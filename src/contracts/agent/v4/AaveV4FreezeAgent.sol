@@ -3,6 +3,8 @@ pragma solidity ^0.8.27;
 
 import {IRiskOracle} from 'chaos-agents/src/contracts/dependencies/IRiskOracle.sol';
 
+import {IAccessManaged} from '../../dependencies/v4/IAccessManaged.sol';
+import {IAccessManager} from '../../dependencies/v4/IAccessManager.sol';
 import {ISpoke} from '../../dependencies/v4/ISpoke.sol';
 import {ISpokeConfigurator} from '../../dependencies/v4/ISpokeConfigurator.sol';
 import {BaseAaveV4Agent} from './BaseAaveV4Agent.sol';
@@ -107,9 +109,36 @@ contract AaveV4FreezeAgent is BaseAaveV4Agent {
         latest.liquidationFee > PERCENTAGE_FACTOR)
     ) return (false, actions);
 
-    if (actions.freeze && !_canCallConfigurator(ISpokeConfigurator.freezeReserve.selector)) {
-      return (false, actions);
-    }
+    if (
+      actions.addZeroCollateralFactor &&
+      !_configuratorCanCallSpoke(market.spoke, ISpoke.addDynamicReserveConfig.selector)
+    ) return (false, actions);
+
+    if (
+      actions.freeze &&
+      (!_canCallConfigurator(ISpokeConfigurator.freezeReserve.selector) ||
+        !_configuratorCanCallSpoke(market.spoke, ISpoke.updateReserveConfig.selector))
+    ) return (false, actions);
     return (true, actions);
+  }
+
+  function _configuratorCanCallSpoke(
+    address spoke,
+    bytes4 selector
+  ) internal view returns (bool ok) {
+    bytes memory data = abi.encodeCall(IAccessManaged.authority, ());
+    uint256 authority;
+    assembly ('memory-safe') {
+      ok := staticcall(gas(), spoke, add(data, 0x20), mload(data), 0x00, 0x20)
+      ok := and(ok, eq(returndatasize(), 0x20))
+      authority := mload(0x00)
+    }
+    if (!ok || authority >> 160 != 0) return false;
+
+    data = abi.encodeCall(IAccessManager.canCall, (CONFIGURATOR, spoke, selector));
+    assembly ('memory-safe') {
+      ok := staticcall(gas(), authority, add(data, 0x20), mload(data), 0x00, 0x40)
+      ok := and(and(ok, eq(returndatasize(), 0x40)), and(eq(mload(0x00), 1), iszero(mload(0x20))))
+    }
   }
 }
