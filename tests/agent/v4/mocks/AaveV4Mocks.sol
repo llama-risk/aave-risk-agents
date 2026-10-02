@@ -65,10 +65,33 @@ contract DirtyBoolHubMock {
   }
 }
 
+contract RawReturnMock {
+  bytes internal _data;
+  bool internal _revert;
+
+  function setReturn(bytes memory data, bool shouldRevert) external {
+    _data = data;
+    _revert = shouldRevert;
+  }
+
+  fallback() external {
+    bytes memory data = _data;
+    bool shouldRevert = _revert;
+    assembly {
+      if shouldRevert {
+        revert(add(data, 0x20), mload(data))
+      }
+      return(add(data, 0x20), mload(data))
+    }
+  }
+}
+
 contract SpokeMock {
   mapping(address => mapping(uint256 => uint256)) internal _reserveIds;
   mapping(address => mapping(uint256 => bool)) internal _reserves;
   mapping(uint256 => ISpoke.ReserveConfig) internal _configs;
+  mapping(uint256 => ISpoke.Reserve) internal _reserveData;
+  mapping(uint256 => mapping(uint32 => ISpoke.DynamicReserveConfig)) internal _dynamicConfigs;
 
   function addReserve(address hub, uint256 assetId, uint256 reserveId) external {
     _reserves[hub][assetId] = true;
@@ -77,6 +100,33 @@ contract SpokeMock {
 
   function setCollateralRisk(uint256 reserveId, uint24 collateralRisk) external {
     _configs[reserveId].collateralRisk = collateralRisk;
+  }
+
+  function setReserveConfig(uint256 reserveId, ISpoke.ReserveConfig memory config) external {
+    _configs[reserveId] = config;
+  }
+
+  function setDynamicConfigKey(uint256 reserveId, uint32 key) external {
+    _reserveData[reserveId].dynamicConfigKey = key;
+  }
+
+  function setDynamicReserveConfig(
+    uint256 reserveId,
+    uint32 key,
+    ISpoke.DynamicReserveConfig memory config
+  ) external {
+    _dynamicConfigs[reserveId][key] = config;
+  }
+
+  function getReserve(uint256 reserveId) external view returns (ISpoke.Reserve memory) {
+    return _reserveData[reserveId];
+  }
+
+  function getDynamicReserveConfig(
+    uint256 reserveId,
+    uint32 key
+  ) external view returns (ISpoke.DynamicReserveConfig memory) {
+    return _dynamicConfigs[reserveId][key];
   }
 
   function getReserveId(address hub, uint256 assetId) external view returns (uint256) {

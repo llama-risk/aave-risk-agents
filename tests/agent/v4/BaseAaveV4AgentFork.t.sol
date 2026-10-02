@@ -174,6 +174,55 @@ contract BaseAaveV4Agent_BaseForkTest is AaveV4ForkTestBase('CollateralRiskUpdat
     assertFalse(_harness.canCallConfigurator(bytes4(0xdeadbeef)));
   }
 
+  function test_configuratorCanCall() public {
+    bytes4[3] memory spokeSelectors = [
+      ISpoke.updateReserveConfig.selector,
+      ISpoke.addDynamicReserveConfig.selector,
+      ISpoke.updateDynamicReserveConfig.selector
+    ];
+    for (uint256 i = 0; i < spokeSelectors.length; i++) {
+      assertTrue(_harness.configuratorCanCall(SPOKE, spokeSelectors[i]));
+    }
+    assertFalse(_harness.configuratorCanCall(SPOKE, bytes4(0xdeadbeef)));
+    assertFalse(_harness.configuratorCanCall(HUB, IHub.updateSpokeConfig.selector));
+
+    AaveV4AgentHarness hubHarness = new AaveV4AgentHarness(
+      address(_agentHub),
+      address(_rangeValidationModule),
+      AaveV4BaseFork.HUB_CONFIGURATOR
+    );
+    assertTrue(hubHarness.configuratorCanCall(HUB, IHub.updateSpokeConfig.selector));
+    assertTrue(hubHarness.configuratorCanCall(HUB, IHub.setInterestRateData.selector));
+
+    _closeTarget(SPOKE);
+    for (uint256 i = 0; i < spokeSelectors.length; i++) {
+      assertFalse(_harness.configuratorCanCall(SPOKE, spokeSelectors[i]));
+    }
+  }
+
+  function test_readers_matchDeployment() public view {
+    for (uint256 i = 0; i < 2; i++) {
+      uint256 reserveId = _reserveIdOf(i == 0 ? AaveV4BaseFork.AAPLc : AaveV4BaseFork.NVDAc);
+      (bool ok, ISpoke.ReserveConfig memory config) = _harness.reserveConfig(SPOKE, reserveId);
+      assertTrue(ok);
+      assertEq(abi.encode(config), abi.encode(ISpoke(SPOKE).getReserveConfig(reserveId)));
+
+      uint32 key;
+      ISpoke.DynamicReserveConfig memory dynamicConfig;
+      (ok, key, dynamicConfig) = _harness.latestDynamicReserveConfig(SPOKE, reserveId);
+      assertTrue(ok);
+      assertEq(key, ISpoke(SPOKE).getReserve(reserveId).dynamicConfigKey);
+      assertEq(
+        abi.encode(dynamicConfig),
+        abi.encode(ISpoke(SPOKE).getDynamicReserveConfig(reserveId, key))
+      );
+    }
+    (bool unknown, ) = _harness.reserveConfig(SPOKE, type(uint256).max);
+    assertFalse(unknown);
+    (unknown, ) = _harness.dynamicConfigKey(SPOKE, type(uint256).max);
+    assertFalse(unknown);
+  }
+
   function test_grantRole_revertsOnUnmappedSelector() public {
     vm.expectRevert(bytes('selector not mapped'));
     this.grantRole(AaveV4BaseFork.SPOKE_CONFIGURATOR, bytes4(0xdeadbeef), address(1));

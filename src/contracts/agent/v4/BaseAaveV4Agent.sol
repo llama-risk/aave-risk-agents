@@ -19,7 +19,8 @@ import {ISpoke} from '../../dependencies/v4/ISpoke.sol';
  *         The update market is the market id of (hub, spoke, asset) and the update value is
  *         abi.encode(hub, spoke, asset, value). Hub-level parameters use spoke = address(0) and
  *         override _isHubLevel. Updates are valid only if the agent can call the configurator
- *         selector immediately.
+ *         selector immediately. Agents also check with _configuratorCanCall that the
+ *         configurator can call the hub or spoke selector it forwards to immediately.
  */
 abstract contract BaseAaveV4Agent is BaseAgent {
   using Strings for string;
@@ -181,22 +182,103 @@ abstract contract BaseAaveV4Agent is BaseAgent {
     return (true, assetId, reserveId);
   }
 
-  function _canCallConfigurator(bytes4 selector) internal view returns (bool) {
+  function _canCallConfigurator(bytes4 selector) internal view virtual returns (bool) {
+    return _canCallImmediately(address(this), CONFIGURATOR, selector);
+  }
+
+  function _configuratorCanCall(address target, bytes4 selector) internal view returns (bool) {
+    return _canCallImmediately(CONFIGURATOR, target, selector);
+  }
+
+  function _canCallImmediately(
+    address caller,
+    address target,
+    bytes4 selector
+  ) internal view returns (bool) {
     (bool ok, uint256 authority) = _staticcallWord(
-      CONFIGURATOR,
+      target,
       abi.encodeCall(IAccessManaged.authority, ())
     );
     if (!ok || authority >> 160 != 0) return false;
 
-    bytes memory data = abi.encodeCall(
-      IAccessManager.canCall,
-      (address(this), CONFIGURATOR, selector)
+    uint256[] memory words;
+    (ok, words) = _staticcallWords(
+      address(uint160(authority)),
+      abi.encodeCall(IAccessManager.canCall, (caller, target, selector)),
+      2
     );
-    assembly ('memory-safe') {
-      ok := staticcall(gas(), authority, add(data, 0x20), mload(data), 0x00, 0x40)
-      ok := and(and(ok, eq(returndatasize(), 0x40)), and(eq(mload(0x00), 1), iszero(mload(0x20))))
+    return ok && words[0] == 1 && words[1] == 0;
+  }
+
+  function _reserveConfig(
+    address spoke,
+    uint256 reserveId
+  ) internal view returns (bool, ISpoke.ReserveConfig memory config) {
+    (bool ok, uint256[] memory words) = _staticcallWords(
+      spoke,
+      abi.encodeCall(ISpoke.getReserveConfig, (reserveId)),
+      5
+    );
+    if (!ok || words[0] > type(uint24).max) return (false, config);
+    for (uint256 i = 1; i < 5; i++) {
+      if (words[i] > 1) return (false, config);
     }
-    return ok;
+    config = ISpoke.ReserveConfig({
+      collateralRisk: uint24(words[0]),
+      paused: words[1] == 1,
+      frozen: words[2] == 1,
+      borrowable: words[3] == 1,
+      receiveSharesEnabled: words[4] == 1
+    });
+    return (true, config);
+  }
+
+  function _dynamicConfigKey(
+    address spoke,
+    uint256 reserveId
+  ) internal view returns (bool, uint32) {
+    (bool ok, uint256[] memory words) = _staticcallWords(
+      spoke,
+      abi.encodeCall(ISpoke.getReserve, (reserveId)),
+      7
+    );
+    if (!ok || words[6] > type(uint32).max) return (false, 0);
+    return (true, uint32(words[6]));
+  }
+
+  function _dynamicReserveConfig(
+    address spoke,
+    uint256 reserveId,
+    uint32 dynamicConfigKey
+  ) internal view returns (bool, ISpoke.DynamicReserveConfig memory config) {
+    (bool ok, uint256[] memory words) = _staticcallWords(
+      spoke,
+      abi.encodeCall(ISpoke.getDynamicReserveConfig, (reserveId, dynamicConfigKey)),
+      3
+    );
+    if (
+      !ok ||
+      words[0] > type(uint16).max ||
+      words[1] > type(uint32).max ||
+      words[2] > type(uint16).max
+    ) return (false, config);
+    config = ISpoke.DynamicReserveConfig({
+      collateralFactor: uint16(words[0]),
+      maxLiquidationBonus: uint32(words[1]),
+      liquidationFee: uint16(words[2])
+    });
+    return (true, config);
+  }
+
+  function _latestDynamicReserveConfig(
+    address spoke,
+    uint256 reserveId
+  ) internal view returns (bool, uint32 key, ISpoke.DynamicReserveConfig memory config) {
+    bool ok;
+    (ok, key) = _dynamicConfigKey(spoke, reserveId);
+    if (!ok) return (false, key, config);
+    (ok, config) = _dynamicReserveConfig(spoke, reserveId, key);
+    return (ok, key, config);
   }
 
   function _decodeUint(bytes calldata value, uint256 max) internal pure returns (bool, uint256) {
@@ -231,11 +313,32 @@ abstract contract BaseAaveV4Agent is BaseAgent {
   function _staticcallWord(
     address target,
     bytes memory data
-  ) private view returns (bool ok, uint256 word) {
+  ) internal view returns (bool ok, uint256 word) {
     assembly ('memory-safe') {
       ok := staticcall(gas(), target, add(data, 0x20), mload(data), 0x00, 0x20)
       ok := and(ok, eq(returndatasize(), 0x20))
       word := mul(mload(0x00), ok)
     }
+  }
+
+  function _staticcallWords(
+    address target,
+    bytes memory data,
+    uint256 count
+  ) internal view returns (bool ok, uint256[] memory words) {
+    words = new uint256[](count);
+    assembly ('memory-safe') {
+      let size := shl(5, count)
+      ok := staticcall(gas(), target, add(data, 0x20), mload(data), add(words, 0x20), size)
+      ok := and(ok, eq(returndatasize(), size))
+    }
+    if (!ok) words = new uint256[](count);
+  }
+
+  function _contains(address[] memory list, address item) internal pure returns (bool) {
+    for (uint256 i = 0; i < list.length; i++) {
+      if (list[i] == item) return true;
+    }
+    return false;
   }
 }

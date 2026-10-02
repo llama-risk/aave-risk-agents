@@ -50,4 +50,17 @@ interface ISpoke {
   function getLiquidationConfig() external view returns (LiquidationConfig memory);
 
   function ORACLE() external view returns (address);
+
+  function updateReserveConfig(uint256 reserveId, ReserveConfig calldata params) external;
+
+  function addDynamicReserveConfig(
+    uint256 reserveId,
+    DynamicReserveConfig calldata dynamicConfig
+  ) external returns (uint32 dynamicConfigKey);
+
+  function updateDynamicReserveConfig(
+    uint256 reserveId,
+    uint32 dynamicConfigKey,
+    DynamicReserveConfig calldata dynamicConfig
+  ) external;
 }

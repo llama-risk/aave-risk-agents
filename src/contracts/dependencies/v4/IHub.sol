@@ -39,4 +39,8 @@ interface IHub {
   ) external view returns (SpokeConfig memory);
 
   function MAX_ALLOWED_SPOKE_CAP() external view returns (uint40);
+
+  function updateSpokeConfig(uint256 assetId, address spoke, SpokeConfig calldata config) external;
+
+  function setInterestRateData(uint256 assetId, bytes calldata irData) external;
 }

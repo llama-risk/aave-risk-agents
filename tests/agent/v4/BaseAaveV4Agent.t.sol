@@ -11,7 +11,8 @@ import {ISpokeConfigurator} from '../../../src/contracts/dependencies/v4/ISpokeC
 import {IHubConfigurator} from '../../../src/contracts/dependencies/v4/IHubConfigurator.sol';
 import {AaveV4AgentHarness} from './mocks/AaveV4AgentHarness.sol';
 import {AaveV4HubAgentHarness} from './mocks/AaveV4HubAgentHarness.sol';
-import {HubMock, RevertingHubMock, ShortReturnHubMock, LongReturnHubMock, DirtyBoolHubMock, SpokeMock, AccessManagerMock, HubConfiguratorMock, SpokeConfiguratorMock} from './mocks/AaveV4Mocks.sol';
+import {ISpoke} from '../../../src/contracts/dependencies/v4/ISpoke.sol';
+import {HubMock, RevertingHubMock, ShortReturnHubMock, LongReturnHubMock, DirtyBoolHubMock, RawReturnMock, SpokeMock, AccessManagerMock, ConfiguratorMock, HubConfiguratorMock, SpokeConfiguratorMock} from './mocks/AaveV4Mocks.sol';
 
 contract BaseAaveV4Agent_Test is BaseAgentTest('CollateralRiskUpdate') {
   RangeValidationModule internal _rangeValidationModule;
@@ -264,6 +265,226 @@ contract BaseAaveV4Agent_Test is BaseAgentTest('CollateralRiskUpdate') {
       address(_spoke)
     );
     assertFalse(noAuthority.canCallConfigurator(SELECTOR));
+  }
+
+  function test_configuratorCanCall() public {
+    address target = address(new ConfiguratorMock(address(_accessManager)));
+    bytes4 selector = ISpoke.updateReserveConfig.selector;
+    assertFalse(_harness.configuratorCanCall(target, selector));
+
+    _allow(address(_configurator), target, selector, true, 0);
+    assertTrue(_harness.configuratorCanCall(target, selector));
+    assertFalse(_harness.configuratorCanCall(target, ISpoke.addDynamicReserveConfig.selector));
+    assertFalse(_harness.canCallImmediately(address(_harness), target, selector));
+
+    _allow(address(_configurator), target, selector, true, 1);
+    assertFalse(_harness.configuratorCanCall(target, selector));
+    _allow(address(_configurator), target, selector, false, 0);
+    assertFalse(_harness.configuratorCanCall(target, selector));
+  }
+
+  function test_configuratorCanCall_agentPermissionIsSeparate() public {
+    address target = address(new ConfiguratorMock(address(_accessManager)));
+    bytes4 selector = ISpoke.updateReserveConfig.selector;
+    _allow(address(_harness), target, selector, true, 0);
+    assertTrue(_harness.canCallImmediately(address(_harness), target, selector));
+    assertFalse(_harness.configuratorCanCall(target, selector));
+    assertTrue(_harness.canCallConfigurator(SELECTOR));
+  }
+
+  function test_configuratorCanCall_badAuthority() public {
+    RawReturnMock dirtyAuthority = new RawReturnMock();
+    dirtyAuthority.setReturn(
+      abi.encode((uint256(1) << 160) | uint160(address(_accessManager))),
+      false
+    );
+    RawReturnMock badCanCall = new RawReturnMock();
+    badCanCall.setReturn(abi.encode(uint256(2), uint256(0)), false);
+    RawReturnMock longCanCall = new RawReturnMock();
+    longCanCall.setReturn(abi.encode(uint256(1), uint256(0), uint256(0)), false);
+
+    address[6] memory authorities = [
+      address(new RevertingHubMock()),
+      address(new ShortReturnHubMock()),
+      address(new DirtyBoolHubMock()),
+      address(new LongReturnHubMock()),
+      address(badCanCall),
+      address(longCanCall)
+    ];
+    for (uint256 i = 0; i < authorities.length; i++) {
+      address target = address(new ConfiguratorMock(authorities[i]));
+      assertFalse(_harness.configuratorCanCall(target, SELECTOR));
+    }
+    assertFalse(_harness.configuratorCanCall(address(new ConfiguratorMock(address(0))), SELECTOR));
+    assertFalse(
+      _harness.configuratorCanCall(address(new ConfiguratorMock(address(0xC0DE))), SELECTOR)
+    );
+    assertFalse(_harness.configuratorCanCall(address(dirtyAuthority), SELECTOR));
+    assertFalse(_harness.configuratorCanCall(address(_spoke), SELECTOR));
+    assertFalse(_harness.configuratorCanCall(address(0xC0DE), SELECTOR));
+  }
+
+  function test_staticcallWords(uint8 count, uint8 returned, uint256 seed) public {
+    count = uint8(bound(count, 1, 12));
+    returned = uint8(bound(returned, 0, 12));
+    uint256[] memory data = new uint256[](returned);
+    for (uint256 i = 0; i < returned; i++) data[i] = uint256(keccak256(abi.encode(seed, i)));
+    RawReturnMock target = new RawReturnMock();
+    target.setReturn(abi.encodePacked(data), false);
+
+    (bool ok, uint256[] memory words) = _harness.staticcallWords(address(target), '', count);
+    assertEq(ok, count == returned);
+    assertEq(words.length, count);
+    for (uint256 i = 0; i < count; i++) assertEq(words[i], ok ? data[i] : 0);
+
+    target.setReturn(abi.encodePacked(data), true);
+    (ok, words) = _harness.staticcallWords(address(target), '', count);
+    assertFalse(ok);
+    for (uint256 i = 0; i < count; i++) assertEq(words[i], 0);
+
+    (ok, ) = _harness.staticcallWords(address(0xC0DE), '', count);
+    assertFalse(ok);
+  }
+
+  function test_staticcallWord() public {
+    RawReturnMock target = new RawReturnMock();
+    target.setReturn(abi.encode(uint256(7)), false);
+    (bool ok, uint256 word) = _harness.staticcallWord(address(target), '');
+    assertTrue(ok);
+    assertEq(word, 7);
+
+    target.setReturn(abi.encode(uint256(7), uint256(8)), false);
+    (ok, word) = _harness.staticcallWord(address(target), '');
+    assertFalse(ok);
+    assertEq(word, 0);
+
+    target.setReturn(abi.encode(uint256(7)), true);
+    (ok, word) = _harness.staticcallWord(address(target), '');
+    assertFalse(ok);
+    assertEq(word, 0);
+  }
+
+  function test_reserveConfig() public {
+    ISpoke.ReserveConfig memory config = ISpoke.ReserveConfig({
+      collateralRisk: 12_34,
+      paused: true,
+      frozen: false,
+      borrowable: true,
+      receiveSharesEnabled: true
+    });
+    _spoke.setReserveConfig(RESERVE_ID, config);
+    (bool ok, ISpoke.ReserveConfig memory read) = _harness.reserveConfig(
+      address(_spoke),
+      RESERVE_ID
+    );
+    assertTrue(ok);
+    assertEq(abi.encode(read), abi.encode(config));
+
+    (ok, ) = _harness.reserveConfig(address(new RevertingHubMock()), RESERVE_ID);
+    assertFalse(ok);
+    (ok, ) = _harness.reserveConfig(address(_hub), RESERVE_ID);
+    assertFalse(ok);
+  }
+
+  function test_reserveConfig_rawWords(uint256[5] memory words) public {
+    for (uint256 i = 0; i < 5; i++) {
+      if (words[i] % 4 != 0)
+        words[i] = i == 0 ? words[i] % (uint256(type(uint24).max) + 2) : words[i] % 3;
+    }
+    RawReturnMock spoke = new RawReturnMock();
+    spoke.setReturn(abi.encode(words), false);
+    (bool ok, ISpoke.ReserveConfig memory read) = _harness.reserveConfig(address(spoke), 0);
+
+    bool valid = words[0] <= type(uint24).max;
+    for (uint256 i = 1; i < 5; i++) valid = valid && words[i] <= 1;
+    assertEq(ok, valid);
+    if (valid) {
+      assertEq(read.collateralRisk, words[0]);
+      assertEq(read.paused, words[1] == 1);
+      assertEq(read.frozen, words[2] == 1);
+      assertEq(read.borrowable, words[3] == 1);
+      assertEq(read.receiveSharesEnabled, words[4] == 1);
+    }
+  }
+
+  function test_dynamicReserveConfig() public {
+    ISpoke.DynamicReserveConfig memory config = ISpoke.DynamicReserveConfig({
+      collateralFactor: 75_00,
+      maxLiquidationBonus: 105_00,
+      liquidationFee: 10_00
+    });
+    _spoke.setDynamicConfigKey(RESERVE_ID, 4);
+    _spoke.setDynamicReserveConfig(RESERVE_ID, 4, config);
+
+    (bool ok, uint32 key) = _harness.dynamicConfigKey(address(_spoke), RESERVE_ID);
+    assertTrue(ok);
+    assertEq(key, 4);
+
+    ISpoke.DynamicReserveConfig memory read;
+    (ok, read) = _harness.dynamicReserveConfig(address(_spoke), RESERVE_ID, 4);
+    assertTrue(ok);
+    assertEq(abi.encode(read), abi.encode(config));
+
+    (ok, key, read) = _harness.latestDynamicReserveConfig(address(_spoke), RESERVE_ID);
+    assertTrue(ok);
+    assertEq(key, 4);
+    assertEq(abi.encode(read), abi.encode(config));
+
+    address reverting = address(new RevertingHubMock());
+    (ok, ) = _harness.dynamicConfigKey(reverting, RESERVE_ID);
+    assertFalse(ok);
+    (ok, ) = _harness.dynamicReserveConfig(reverting, RESERVE_ID, 4);
+    assertFalse(ok);
+    (ok, , ) = _harness.latestDynamicReserveConfig(reverting, RESERVE_ID);
+    assertFalse(ok);
+  }
+
+  function test_dynamicConfigKey_rawWords(uint256 key) public {
+    RawReturnMock spoke = new RawReturnMock();
+    uint256[7] memory words;
+    words[6] = key % 2 == 0 ? key % (uint256(type(uint32).max) + 2) : key;
+    spoke.setReturn(abi.encode(words), false);
+    (bool ok, uint32 read) = _harness.dynamicConfigKey(address(spoke), 0);
+    assertEq(ok, words[6] <= type(uint32).max);
+    assertEq(read, ok ? words[6] : 0);
+
+    (ok, , ) = _harness.latestDynamicReserveConfig(address(spoke), 0);
+    assertFalse(ok);
+  }
+
+  function test_dynamicReserveConfig_rawWords(uint256[3] memory words) public {
+    uint256[3] memory maxes = [
+      uint256(type(uint16).max),
+      uint256(type(uint32).max),
+      uint256(type(uint16).max)
+    ];
+    for (uint256 i = 0; i < 3; i++) {
+      if (words[i] % 4 != 0) words[i] = words[i] % (maxes[i] + 2);
+    }
+    RawReturnMock spoke = new RawReturnMock();
+    spoke.setReturn(abi.encode(words), false);
+    (bool ok, ISpoke.DynamicReserveConfig memory read) = _harness.dynamicReserveConfig(
+      address(spoke),
+      0,
+      0
+    );
+    bool valid = words[0] <= maxes[0] && words[1] <= maxes[1] && words[2] <= maxes[2];
+    assertEq(ok, valid);
+    if (valid) {
+      assertEq(read.collateralFactor, words[0]);
+      assertEq(read.maxLiquidationBonus, words[1]);
+      assertEq(read.liquidationFee, words[2]);
+    }
+  }
+
+  function test_contains(address[] memory list, address item, uint256 index) public view {
+    bool expected;
+    for (uint256 i = 0; i < list.length; i++) expected = expected || list[i] == item;
+    assertEq(_harness.contains(list, item), expected);
+    if (list.length != 0) {
+      list[index % list.length] = item;
+      assertTrue(_harness.contains(list, item));
+    }
   }
 
   function test_assetId() public view {

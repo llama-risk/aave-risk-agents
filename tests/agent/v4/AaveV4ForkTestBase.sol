@@ -22,6 +22,8 @@ interface IAccessManagerLike {
   function grantRole(uint64 roleId, address account, uint32 executionDelay) external;
 
   function revokeRole(uint64 roleId, address account) external;
+
+  function setTargetClosed(address target, bool closed) external;
 }
 
 library AaveV4BaseFork {
@@ -151,6 +153,12 @@ abstract contract AaveV4ForkTestBase is Test {
     uint64 roleId = _mappedRole(accessManager, target, selector);
     vm.prank(accessManager.getRoleMember(accessManager.getRoleAdmin(roleId), 0));
     accessManager.revokeRole(roleId, account);
+  }
+
+  function _closeTarget(address target) internal {
+    IAccessManagerLike accessManager = IAccessManagerLike(_accessManager());
+    vm.prank(accessManager.getRoleMember(0, 0));
+    accessManager.setTargetClosed(target, true);
   }
 
   function _mappedRole(

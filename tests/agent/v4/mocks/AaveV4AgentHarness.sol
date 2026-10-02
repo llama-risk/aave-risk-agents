@@ -51,6 +51,60 @@ contract AaveV4AgentHarness is BaseAaveV4Agent {
     return _canCallConfigurator(selector);
   }
 
+  function configuratorCanCall(address target, bytes4 selector) external view returns (bool) {
+    return _configuratorCanCall(target, selector);
+  }
+
+  function canCallImmediately(
+    address caller,
+    address target,
+    bytes4 selector
+  ) external view returns (bool) {
+    return _canCallImmediately(caller, target, selector);
+  }
+
+  function reserveConfig(
+    address spoke,
+    uint256 id
+  ) external view returns (bool, ISpoke.ReserveConfig memory) {
+    return _reserveConfig(spoke, id);
+  }
+
+  function dynamicConfigKey(address spoke, uint256 id) external view returns (bool, uint32) {
+    return _dynamicConfigKey(spoke, id);
+  }
+
+  function dynamicReserveConfig(
+    address spoke,
+    uint256 id,
+    uint32 key
+  ) external view returns (bool, ISpoke.DynamicReserveConfig memory) {
+    return _dynamicReserveConfig(spoke, id, key);
+  }
+
+  function latestDynamicReserveConfig(
+    address spoke,
+    uint256 id
+  ) external view returns (bool, uint32, ISpoke.DynamicReserveConfig memory) {
+    return _latestDynamicReserveConfig(spoke, id);
+  }
+
+  function staticcallWord(address target, bytes memory data) external view returns (bool, uint256) {
+    return _staticcallWord(target, data);
+  }
+
+  function staticcallWords(
+    address target,
+    bytes memory data,
+    uint256 count
+  ) external view returns (bool, uint256[] memory) {
+    return _staticcallWords(target, data, count);
+  }
+
+  function contains(address[] memory list, address item) external pure returns (bool) {
+    return _contains(list, item);
+  }
+
   function _configuratorSelector() internal pure override returns (bytes4) {
     return ISpokeConfigurator.updateCollateralRisk.selector;
   }
