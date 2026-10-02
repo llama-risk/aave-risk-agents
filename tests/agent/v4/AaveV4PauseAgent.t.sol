@@ -8,6 +8,7 @@ import {BaseAgentTest} from 'chaos-agents/tests/agent/BaseAgentTest.sol';
 
 import {AaveV4PauseAgent} from '../../../src/contracts/agent/v4/AaveV4PauseAgent.sol';
 import {BaseAaveV4Agent} from '../../../src/contracts/agent/v4/BaseAaveV4Agent.sol';
+import {ISpoke} from '../../../src/contracts/dependencies/v4/ISpoke.sol';
 import {ISpokeConfigurator} from '../../../src/contracts/dependencies/v4/ISpokeConfigurator.sol';
 import {HubMock, AccessManagerMock} from './mocks/AaveV4Mocks.sol';
 import {PausableSpokeMock, PauseSpokeConfiguratorMock, B20OracleRegistryMock} from './mocks/AaveV4PauseMocks.sol';
@@ -37,6 +38,14 @@ contract AaveV4PauseAgent_Test is BaseAgentTest('ReservePause') {
     _configurator = new PauseSpokeConfiguratorMock(address(_accessManager));
     _hub = new HubMock();
     _spoke = new PausableSpokeMock();
+    _spoke.setAuthority(address(_accessManager));
+    _accessManager.setCanCall(
+      address(_configurator),
+      address(_spoke),
+      ISpoke.updateReserveConfig.selector,
+      true,
+      0
+    );
     _registry = new B20OracleRegistryMock();
 
     _hub.listAsset(ASSET, ASSET_ID);
@@ -186,9 +195,91 @@ contract AaveV4PauseAgent_Test is BaseAgentTest('ReservePause') {
     );
   }
 
-  function test_setHubAgentId_onlyOnce() public {
-    vm.expectRevert(AaveV4PauseAgent.HubAgentIdAlreadySet.selector);
-    _pauseAgent.setHubAgentId(_agentId);
+  function test_validate_rejectsWhenSpokeRejectsConfigurator() public {
+    bytes4 selector = ISpoke.updateReserveConfig.selector;
+    _accessManager.setCanCall(address(_configurator), address(_spoke), selector, false, 0);
+    assertFalse(_validate(_market, _payload(ASSET, abi.encode(uint256(1)))));
+
+    _accessManager.setCanCall(address(_configurator), address(_spoke), selector, true, 1);
+    assertFalse(_validate(_market, _payload(ASSET, abi.encode(uint256(1)))));
+
+    _accessManager.setCanCall(address(_configurator), address(_spoke), selector, true, 0);
+    _spoke.setAuthority(address(0));
+    assertFalse(_validate(_market, _payload(ASSET, abi.encode(uint256(1)))));
+  }
+
+  function test_check_skipsWhenSpokeRejectsConfigurator() public {
+    _accessManager.setCanCall(
+      address(_configurator),
+      address(_spoke),
+      ISpoke.updateReserveConfig.selector,
+      false,
+      0
+    );
+    _publish(_market, _payload(ASSET, abi.encode(uint256(1))));
+    assertFalse(_checkAndPerformAutomation(_agentId));
+  }
+
+  function test_validate_rejectsUpdateNotNewerThanLastPause() public {
+    _pauseAgent.setPokeEnabled(address(_hub), address(_spoke), ASSET, true);
+    _registry.setOraclePaused(ASSET, true);
+    _pauseAgent.poke(address(_hub), address(_spoke), ASSET);
+    assertEq(_pauseAgent.lastPausedAt(_market), block.timestamp);
+
+    _spoke.setPaused(RESERVE_ID, false);
+    assertFalse(_validate(_market, _payload(ASSET, abi.encode(uint256(1)))));
+    assertTrue(_validate(_otherMarket, _payload(OTHER_ASSET, abi.encode(uint256(1)))));
+
+    vm.warp(block.timestamp + 1);
+    assertTrue(_validate(_market, _payload(ASSET, abi.encode(uint256(1)))));
+  }
+
+  function test_execute_staleUpdateDoesNotRepauseAfterUnpause() public {
+    _publish(_market, _payload(ASSET, abi.encode(uint256(1))));
+    vm.warp(block.timestamp + 1 hours);
+    _pauseAgent.setPokeEnabled(address(_hub), address(_spoke), ASSET, true);
+    _registry.setOraclePaused(ASSET, true);
+    _pauseAgent.poke(address(_hub), address(_spoke), ASSET);
+    assertFalse(_checkAndPerformAutomation(_agentId));
+
+    _registry.setOraclePaused(ASSET, false);
+    _spoke.setPaused(RESERVE_ID, false);
+    vm.warp(block.timestamp + 12 hours);
+    assertFalse(_checkAndPerformAutomation(_agentId));
+    assertFalse(_spoke.getReserveConfig(RESERVE_ID).paused);
+  }
+
+  function test_inject_recordsLastPausedAt() public {
+    _publish(_market, _payload(ASSET, abi.encode(uint256(1))));
+    vm.warp(block.timestamp + 1);
+    assertTrue(_checkAndPerformAutomation(_agentId));
+    assertEq(_pauseAgent.lastPausedAt(_market), block.timestamp);
+    assertEq(_pauseAgent.lastPausedAt(_otherMarket), 0);
+  }
+
+  function test_setHubAgentId_repointsToNewRegistration() public {
+    _pauseAgent.setPokeEnabled(address(_hub), address(_spoke), ASSET, true);
+    _registry.setOraclePaused(ASSET, true);
+
+    IAgentConfigurator.AgentRegistrationInput memory registration = _registration(
+      address(_pauseAgent)
+    );
+    registration.allowedMarkets = new address[](1);
+    registration.allowedMarkets[0] = _market;
+    uint256 newId = _agentHub.registerAgent(registration);
+    vm.prank(_admin);
+    _agentHub.setAgentEnabled(_agentId, false);
+
+    vm.expectRevert(AaveV4PauseAgent.AgentDisabled.selector);
+    _pauseAgent.poke(address(_hub), address(_spoke), ASSET);
+
+    vm.expectEmit(address(_pauseAgent));
+    emit AaveV4PauseAgent.HubAgentIdSet(newId);
+    _pauseAgent.setHubAgentId(newId);
+    assertEq(_pauseAgent.hubAgentId(), newId);
+
+    _pauseAgent.poke(address(_hub), address(_spoke), ASSET);
+    assertTrue(_spoke.getReserveConfig(RESERVE_ID).paused);
   }
 
   function test_setHubAgentId_onlyAgentHubOwner(address caller) public {
@@ -312,6 +403,29 @@ contract AaveV4PauseAgent_Test is BaseAgentTest('ReservePause') {
     _pauseAgent.poke(address(_hub), address(_spoke), ASSET);
   }
 
+  function test_poke_revertsWhenMarketNotAllowed() public {
+    _pauseAgent.setPokeEnabled(address(_hub), address(_spoke), ASSET, true);
+    _registry.setOraclePaused(ASSET, true);
+    _agentHub.removeAllowedMarket(_agentId, _market);
+
+    vm.expectRevert(abi.encodeWithSelector(AaveV4PauseAgent.MarketNotAllowed.selector, _market));
+    _pauseAgent.poke(address(_hub), address(_spoke), ASSET);
+
+    _agentHub.addAllowedMarket(_agentId, _market);
+    _agentHub.addRestrictedMarket(_agentId, _market);
+    vm.expectRevert(abi.encodeWithSelector(AaveV4PauseAgent.MarketNotAllowed.selector, _market));
+    _pauseAgent.poke(address(_hub), address(_spoke), ASSET);
+
+    _agentHub.removeRestrictedMarket(_agentId, _market);
+    _agentHub.setMarketsFromAgentEnabled(_agentId, true);
+    vm.expectRevert(abi.encodeWithSelector(AaveV4PauseAgent.MarketNotAllowed.selector, _market));
+    _pauseAgent.poke(address(_hub), address(_spoke), ASSET);
+
+    _agentHub.setMarketsFromAgentEnabled(_agentId, false);
+    _pauseAgent.poke(address(_hub), address(_spoke), ASSET);
+    assertTrue(_spoke.getReserveConfig(RESERVE_ID).paused);
+  }
+
   function test_poke_revertsWhenIssuerNotPaused() public {
     _pauseAgent.setPokeEnabled(address(_hub), address(_spoke), ASSET, true);
     vm.expectRevert(abi.encodeWithSelector(AaveV4PauseAgent.IssuerNotPaused.selector, ASSET));
@@ -328,6 +442,7 @@ contract AaveV4PauseAgent_Test is BaseAgentTest('ReservePause') {
     address asset = address(0xdead);
     address market = _pauseAgent.marketId(address(_hub), address(_spoke), asset);
     _pauseAgent.setPokeEnabled(address(_hub), address(_spoke), asset, true);
+    _agentHub.addAllowedMarket(_agentId, market);
     _registry.setOraclePaused(asset, true);
 
     vm.expectRevert(abi.encodeWithSelector(AaveV4PauseAgent.ReserveNotListed.selector, market));

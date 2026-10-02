@@ -42,6 +42,8 @@ interface ISpoke {
 
   function getReserveConfig(uint256 reserveId) external view returns (ReserveConfig memory);
 
+  function updateReserveConfig(uint256 reserveId, ReserveConfig calldata params) external;
+
   function getDynamicReserveConfig(
     uint256 reserveId,
     uint32 dynamicConfigKey

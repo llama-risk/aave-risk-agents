@@ -4,6 +4,12 @@ pragma solidity ^0.8.27;
 import {ConfiguratorMock, SpokeMock} from './AaveV4Mocks.sol';
 
 contract PausableSpokeMock is SpokeMock {
+  address public authority;
+
+  function setAuthority(address authority_) external {
+    authority = authority_;
+  }
+
   function setPaused(uint256 reserveId, bool paused) external {
     _configs[reserveId].paused = paused;
   }

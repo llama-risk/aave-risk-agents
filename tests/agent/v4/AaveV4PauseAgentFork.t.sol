@@ -21,6 +21,20 @@ interface IB20OracleRegistryAdmin {
 
 interface ISpokeSupply {
   function supply(uint256 reserveId, uint256 amount, address onBehalfOf) external;
+
+  function liquidationCall(
+    uint256 collateralReserveId,
+    uint256 debtReserveId,
+    address user,
+    uint256 debtToCover,
+    bool receiveShares
+  ) external;
+}
+
+interface IAccessManagerAdmin {
+  function getRoleMember(uint64 roleId, uint256 index) external view returns (address);
+
+  function setTargetClosed(address target, bool closed) external;
 }
 
 contract AaveV4PauseAgent_BaseForkTest is AaveV4ForkTestBase('ReservePause') {
@@ -175,6 +189,77 @@ contract AaveV4PauseAgent_BaseForkTest is AaveV4ForkTestBase('ReservePause') {
     vm.expectRevert();
     _pauseAgent.poke(HUB, SPOKE, AAPLc);
     assertFalse(ISpoke(SPOKE).getReserveConfig(_reserveIdOf(AAPLc)).paused);
+  }
+
+  function test_liquidation_blockedWhilePaused() public {
+    uint256 aapl = _reserveIdOf(AAPLc);
+    uint256 nvda = _reserveIdOf(NVDAc);
+    address user = makeAddr('user');
+    vm.setEvmVersion('cancun');
+
+    vm.expectRevert(bytes4(keccak256('ReserveNotSupplied()')));
+    ISpokeSupply(SPOKE).liquidationCall(aapl, nvda, user, 1, false);
+
+    _publish(HUB, SPOKE, AAPLc, abi.encode(uint256(1)));
+    assertTrue(_checkAndExecute());
+
+    vm.expectRevert(bytes4(keccak256('ReservePaused()')));
+    ISpokeSupply(SPOKE).liquidationCall(aapl, nvda, user, 1, false);
+    vm.expectRevert(bytes4(keccak256('ReservePaused()')));
+    ISpokeSupply(SPOKE).liquidationCall(nvda, aapl, user, 1, false);
+  }
+
+  function test_staleUpdateDoesNotRepauseAfterGovernanceUnpause() public {
+    uint256 reserveId = _reserveIdOf(AAPLc);
+    _etchB20(AAPLc);
+    _pauseAgent.setPokeEnabled(HUB, SPOKE, AAPLc, true);
+
+    _publish(HUB, SPOKE, AAPLc, abi.encode(uint256(1)));
+    vm.warp(block.timestamp + 1 hours);
+    vm.prank(ISSUER_PAUSER);
+    IB20OracleRegistryAdmin(ISSUER_REGISTRY).setOraclePaused(AAPLc, true);
+    _pauseAgent.poke(HUB, SPOKE, AAPLc);
+    assertTrue(ISpoke(SPOKE).getReserveConfig(reserveId).paused);
+
+    vm.prank(ISSUER_PAUSER);
+    IB20OracleRegistryAdmin(ISSUER_REGISTRY).setOraclePaused(AAPLc, false);
+    address governance = makeAddr('governance');
+    _grantRole(
+      AaveV4BaseFork.SPOKE_CONFIGURATOR,
+      ISpokeConfigurator.updatePaused.selector,
+      governance
+    );
+    vm.prank(governance);
+    ISpokeConfigurator(AaveV4BaseFork.SPOKE_CONFIGURATOR).updatePaused(SPOKE, reserveId, false);
+
+    vm.warp(block.timestamp + 12 hours);
+    (bool shouldRun, ) = _check();
+    assertFalse(shouldRun);
+    assertFalse(ISpoke(SPOKE).getReserveConfig(reserveId).paused);
+  }
+
+  function test_poke_followsHubAllowedMarkets() public {
+    _etchB20(AAPLc);
+    _pauseAgent.setPokeEnabled(HUB, SPOKE, AAPLc, true);
+    vm.prank(ISSUER_PAUSER);
+    IB20OracleRegistryAdmin(ISSUER_REGISTRY).setOraclePaused(AAPLc, true);
+    address market = _marketId(HUB, SPOKE, AAPLc);
+    _agentHub.removeAllowedMarket(_agentId, market);
+
+    vm.expectRevert(abi.encodeWithSelector(AaveV4PauseAgent.MarketNotAllowed.selector, market));
+    _pauseAgent.poke(HUB, SPOKE, AAPLc);
+    assertFalse(ISpoke(SPOKE).getReserveConfig(_reserveIdOf(AAPLc)).paused);
+  }
+
+  function test_check_skipsWhenSpokeClosed() public {
+    IAccessManagerAdmin accessManager = IAccessManagerAdmin(AaveV4BaseFork.ACCESS_MANAGER);
+    vm.prank(accessManager.getRoleMember(0, 0));
+    accessManager.setTargetClosed(SPOKE, true);
+
+    _publish(HUB, SPOKE, AAPLc, abi.encode(uint256(1)));
+    _publish(HUB, SPOKE, NVDAc, abi.encode(uint256(1)));
+    (bool shouldRun, ) = _check();
+    assertFalse(shouldRun);
   }
 
   function _etchB20(address token) internal {
