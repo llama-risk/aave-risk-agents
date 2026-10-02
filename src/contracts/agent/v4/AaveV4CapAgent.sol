@@ -5,6 +5,8 @@ import {IRiskOracle} from 'chaos-agents/src/contracts/dependencies/IRiskOracle.s
 import {IRangeValidationModule} from 'chaos-agents/src/interfaces/IRangeValidationModule.sol';
 
 import {BaseAaveV4Agent} from './BaseAaveV4Agent.sol';
+import {IAccessManaged} from '../../dependencies/v4/IAccessManaged.sol';
+import {IAccessManager} from '../../dependencies/v4/IAccessManager.sol';
 import {IHub} from '../../dependencies/v4/IHub.sol';
 import {IHubConfigurator} from '../../dependencies/v4/IHubConfigurator.sol';
 
@@ -67,6 +69,7 @@ contract AaveV4CapAgent is BaseAaveV4Agent {
     uint256 currentCap;
     (ok, currentCap) = _currentCap(market.hub, assetId, market.spoke);
     if (!ok || currentCap == 0 || currentCap == MAX_CAP || currentCap == newCap) return false;
+    if (!_configuratorCanWriteHub(market.hub)) return false;
 
     return
       RANGE_VALIDATION_MODULE.validate(
@@ -111,5 +114,22 @@ contract AaveV4CapAgent is BaseAaveV4Agent {
     uint256 cap = KIND == CapKind.ADD ? addCap : drawCap;
     if (cap > MAX_CAP) return (false, 0);
     return (true, cap);
+  }
+
+  function _configuratorCanWriteHub(address hub) internal view returns (bool ok) {
+    bytes memory authorityCall = abi.encodeCall(IAccessManaged.authority, ());
+    bytes memory canCall = abi.encodeCall(
+      IAccessManager.canCall,
+      (CONFIGURATOR, hub, IHub.updateSpokeConfig.selector)
+    );
+    assembly ('memory-safe') {
+      ok := staticcall(gas(), hub, add(authorityCall, 0x20), mload(authorityCall), 0x00, 0x20)
+      let authority := mload(0x00)
+      ok := and(and(ok, eq(returndatasize(), 0x20)), iszero(shr(160, authority)))
+      if ok {
+        ok := staticcall(gas(), authority, add(canCall, 0x20), mload(canCall), 0x00, 0x40)
+        ok := and(and(ok, eq(returndatasize(), 0x40)), and(eq(mload(0x00), 1), iszero(mload(0x20))))
+      }
+    }
   }
 }

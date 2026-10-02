@@ -8,6 +8,7 @@ import {BaseAgentTest} from 'chaos-agents/tests/agent/BaseAgentTest.sol';
 
 import {BaseAaveV4Agent} from '../../../src/contracts/agent/v4/BaseAaveV4Agent.sol';
 import {AaveV4CapAgent} from '../../../src/contracts/agent/v4/AaveV4CapAgent.sol';
+import {IHub} from '../../../src/contracts/dependencies/v4/IHub.sol';
 import {IHubConfigurator} from '../../../src/contracts/dependencies/v4/IHubConfigurator.sol';
 import {AccessManagerMock, RevertingHubMock} from './mocks/AaveV4Mocks.sol';
 import {CapHubMock, CapConfiguratorMock} from './mocks/AaveV4CapMocks.sol';
@@ -40,6 +41,7 @@ abstract contract AaveV4CapAgent_TestBase is BaseAgentTest {
     _accessManager = new AccessManagerMock();
     _configurator = new CapConfiguratorMock(address(_accessManager));
     _hub = new CapHubMock();
+    _hub.setAuthority(address(_accessManager));
 
     _hub.listAsset(ASSET, ASSET_ID);
     _hub.listSpoke(ASSET_ID, SPOKE);
@@ -54,6 +56,7 @@ abstract contract AaveV4CapAgent_TestBase is BaseAgentTest {
     );
     _market = _capAgent.marketId(address(_hub), SPOKE, ASSET);
     _allow(_selector(), true, 0);
+    _allowHub(true, 0);
     return address(_capAgent);
   }
 
@@ -208,6 +211,62 @@ abstract contract AaveV4CapAgent_TestBase is BaseAgentTest {
 
     _allow(_selector(), true, 1);
     assertFalse(_validate(1_200_000));
+  }
+
+  function test_validate_configuratorCannotWriteHub() public {
+    _allowHub(false, 0);
+    assertFalse(_validate(1_200_000));
+
+    _allowHub(true, 1);
+    assertFalse(_validate(1_200_000));
+
+    _allowHub(true, 0);
+    assertTrue(_validate(1_200_000));
+  }
+
+  function test_validate_hubAuthorityMissing() public {
+    _hub.setAuthority(address(0));
+    assertFalse(_validate(1_200_000));
+
+    _hub.setAuthority(address(new RevertingHubMock()));
+    assertFalse(_validate(1_200_000));
+
+    _hub.setAuthority(address(_accessManager));
+    assertTrue(_validate(1_200_000));
+  }
+
+  function test_inject_revertsWhenHubClosed() public {
+    _allowHub(false, 0);
+    IRiskOracle.RiskParameterUpdate memory update = _update(_market, _payload(1_200_000));
+    vm.prank(address(_agentHub));
+    vm.expectRevert(BaseAaveV4Agent.InvalidUpdate.selector);
+    _capAgent.inject(_agentId, _agentContext, update);
+  }
+
+  function test_checkAndExecute_closedHubDoesNotBlockBatch() public {
+    CapHubMock closedHub = new CapHubMock();
+    closedHub.setAuthority(address(_accessManager));
+    closedHub.listAsset(ASSET, ASSET_ID);
+    closedHub.listSpoke(ASSET_ID, SPOKE);
+    closedHub.setCaps(ASSET_ID, SPOKE, CURRENT_CAP, CURRENT_CAP);
+    address closed = _capAgent.marketId(address(closedHub), SPOKE, ASSET);
+    _agentHub.addAllowedMarket(_agentId, closed);
+    _publish(closed, abi.encode(address(closedHub), SPOKE, ASSET, abi.encode(1_200_000)));
+    _publish(_market, _payload(1_200_000));
+
+    uint256[] memory agentIds = new uint256[](1);
+    agentIds[0] = _agentId;
+    (bool shouldRun, IAgentHub.ActionData[] memory actions) = _agentHub.check(agentIds);
+    assertTrue(shouldRun);
+    assertEq(actions[0].markets.length, 1);
+    assertEq(actions[0].markets[0], _market);
+
+    address[] memory markets = new address[](2);
+    markets[0] = closed;
+    markets[1] = _market;
+    actions[0].markets = markets;
+    _agentHub.execute(actions);
+    _assertWrite(1_200_000);
   }
 
   function test_validate_spokeConfigReverts() public {
@@ -371,6 +430,16 @@ abstract contract AaveV4CapAgent_TestBase is BaseAgentTest {
 
   function _allow(bytes4 selector, bool allowed, uint32 delay) internal {
     _accessManager.setCanCall(address(_capAgent), address(_configurator), selector, allowed, delay);
+  }
+
+  function _allowHub(bool allowed, uint32 delay) internal {
+    _accessManager.setCanCall(
+      address(_configurator),
+      address(_hub),
+      IHub.updateSpokeConfig.selector,
+      allowed,
+      delay
+    );
   }
 
   function _payload(uint256 value) internal view returns (bytes memory) {

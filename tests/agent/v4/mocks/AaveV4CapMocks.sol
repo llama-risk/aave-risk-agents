@@ -5,6 +5,7 @@ import {IHub} from '../../../../src/contracts/dependencies/v4/IHub.sol';
 import {ConfiguratorMock, HubMock} from './AaveV4Mocks.sol';
 
 contract CapHubMock is HubMock {
+  address public authority;
   mapping(uint256 => mapping(address => IHub.SpokeConfig)) internal _configs;
   bytes internal _rawConfig;
   bool internal _revertConfig;
@@ -13,6 +14,10 @@ contract CapHubMock is HubMock {
     _configs[assetId][spoke].addCap = addCap;
     _configs[assetId][spoke].drawCap = drawCap;
     _configs[assetId][spoke].active = true;
+  }
+
+  function setAuthority(address authority_) external {
+    authority = authority_;
   }
 
   function setRawConfig(bytes calldata rawConfig) external {

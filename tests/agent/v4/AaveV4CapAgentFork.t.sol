@@ -292,6 +292,64 @@ abstract contract AaveV4CapAgentEthereumForkTest is AaveV4CapAgentForkTestBase {
     (bool shouldRun, ) = _check();
     assertFalse(shouldRun);
   }
+
+  function test_rejectsOutOfRange() public {
+    _publishCap(CORE, MAIN, USDC, (_cap(CORE, MAIN, USDC) * 126) / 100);
+    _publishCap(PRIME, BLUECHIP, USDC, (_cap(PRIME, BLUECHIP, USDC) * 74) / 100);
+    (bool shouldRun, ) = _check();
+    assertFalse(shouldRun);
+  }
+
+  function test_updatesBothHubsInOneBatch() public {
+    uint256 coreCap = (_cap(CORE, MAIN, USDC) * 110) / 100;
+    uint256 primeCap = (_cap(PRIME, BLUECHIP, USDC) * 90) / 100;
+    IHub.SpokeConfig memory coreBefore = _config(CORE, MAIN, USDC);
+    IHub.SpokeConfig memory primeBefore = _config(PRIME, BLUECHIP, USDC);
+    IHub.SpokeConfig memory forexBefore = _config(CORE, FOREX, USDC);
+    IHub.SpokeConfig memory bluechipBefore = _config(CORE, BLUECHIP, USDC);
+
+    _publishCap(CORE, MAIN, USDC, coreCap);
+    _publishCap(PRIME, BLUECHIP, USDC, primeCap);
+    (bool shouldRun, IAgentHub.ActionData[] memory actions) = _check();
+    assertTrue(shouldRun);
+    assertEq(actions[0].markets.length, 2);
+    _agentHub.execute(actions);
+
+    _assertOnlyCapChanged(coreBefore, _config(CORE, MAIN, USDC), coreCap);
+    _assertOnlyCapChanged(primeBefore, _config(PRIME, BLUECHIP, USDC), primeCap);
+    _assertUnchanged(forexBefore, _config(CORE, FOREX, USDC));
+    _assertUnchanged(bluechipBefore, _config(CORE, BLUECHIP, USDC));
+  }
+
+  function test_closedHubDoesNotBlockOtherHub() public {
+    uint256 coreCap = (_cap(CORE, MAIN, USDC) * 110) / 100;
+    IHub.SpokeConfig memory primeBefore = _config(PRIME, BLUECHIP, USDC);
+    _publishCap(CORE, MAIN, USDC, coreCap);
+    _publishCap(PRIME, BLUECHIP, USDC, (primeBefore.drawCap * 90) / 100);
+    _closeTarget(PRIME);
+
+    (bool shouldRun, IAgentHub.ActionData[] memory actions) = _check();
+    assertTrue(shouldRun);
+    assertEq(actions[0].markets.length, 1);
+    assertEq(actions[0].markets[0], _marketId(CORE, MAIN, USDC));
+
+    address[] memory markets = new address[](2);
+    markets[0] = _marketId(PRIME, BLUECHIP, USDC);
+    markets[1] = actions[0].markets[0];
+    actions[0].markets = markets;
+    _agentHub.execute(actions);
+
+    assertEq(_cap(CORE, MAIN, USDC), coreCap);
+    _assertUnchanged(primeBefore, _config(PRIME, BLUECHIP, USDC));
+  }
+
+  function test_skipsAfterConfiguratorLosesHubRole() public {
+    _publishCap(CORE, MAIN, USDC, (_cap(CORE, MAIN, USDC) * 110) / 100);
+    _publishCap(PRIME, BLUECHIP, USDC, (_cap(PRIME, BLUECHIP, USDC) * 90) / 100);
+    _revokeRole(PRIME, IHub.updateSpokeConfig.selector, _hubConfigurator());
+    (bool shouldRun, ) = _check();
+    assertFalse(shouldRun);
+  }
 }
 
 contract AaveV4CapAgent_AddCap_EthereumForkTest is
