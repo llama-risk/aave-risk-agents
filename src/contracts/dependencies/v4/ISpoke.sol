@@ -34,6 +34,17 @@ interface ISpoke {
     uint16 liquidationBonusFactor;
   }
 
+  function addDynamicReserveConfig(
+    uint256 reserveId,
+    DynamicReserveConfig calldata dynamicConfig
+  ) external returns (uint32 dynamicConfigKey);
+
+  function updateDynamicReserveConfig(
+    uint256 reserveId,
+    uint32 dynamicConfigKey,
+    DynamicReserveConfig calldata dynamicConfig
+  ) external;
+
   function getReserveCount() external view returns (uint256);
 
   function getReserveId(address hub, uint256 assetId) external view returns (uint256);
