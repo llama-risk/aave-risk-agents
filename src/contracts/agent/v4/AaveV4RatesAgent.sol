@@ -4,8 +4,6 @@ pragma solidity ^0.8.27;
 import {IRangeValidationModule} from 'chaos-agents/src/interfaces/IRangeValidationModule.sol';
 import {IRiskOracle} from 'chaos-agents/src/contracts/dependencies/IRiskOracle.sol';
 
-import {IAccessManaged} from '../../dependencies/v4/IAccessManaged.sol';
-import {IAccessManager} from '../../dependencies/v4/IAccessManager.sol';
 import {IAssetInterestRateStrategy} from '../../dependencies/v4/IAssetInterestRateStrategy.sol';
 import {IHub} from '../../dependencies/v4/IHub.sol';
 import {IHubConfigurator} from '../../dependencies/v4/IHubConfigurator.sol';
@@ -109,23 +107,27 @@ contract AaveV4RatesAgent is BaseAaveV4Agent {
     bytes calldata value
   ) internal view returns (bool, uint256[4] memory current, uint256[4] memory next) {
     (bool ok, uint256 assetId) = _assetId(market.hub, market.asset);
-    if (!ok || !_hubAllowsConfigurator(market.hub)) return (false, current, next);
+    if (!ok || !_configuratorCanCall(market.hub, IHub.setInterestRateData.selector))
+      return (false, current, next);
 
     (ok, next) = _decodeRates(value);
     if (!ok) return (false, current, next);
 
-    uint256[4] memory config;
-    (ok, config) = _call4(market.hub, abi.encodeCall(IHub.getAssetConfig, (assetId)));
-    address strategy = address(uint160(config[2]));
-    if (!ok || config[2] >> 160 != 0 || !_withinStrategyBounds(strategy, next)) {
+    uint256[] memory words;
+    (ok, words) = _staticcallWords(market.hub, abi.encodeCall(IHub.getAssetConfig, (assetId)), 4);
+    address strategy = address(uint160(words[2]));
+    if (!ok || words[2] >> 160 != 0 || !_withinStrategyBounds(strategy, next)) {
       return (false, current, next);
     }
 
-    (ok, current) = _call4(
+    (ok, words) = _staticcallWords(
       strategy,
-      abi.encodeCall(IAssetInterestRateStrategy.getInterestRateData, (assetId))
+      abi.encodeCall(IAssetInterestRateStrategy.getInterestRateData, (assetId)),
+      4
     );
-    return (ok, current, next);
+    if (!ok) return (false, current, next);
+    current = [words[0], words[1], words[2], words[3]];
+    return (true, current, next);
   }
 
   function _decodeRates(
@@ -146,56 +148,23 @@ contract AaveV4RatesAgent is BaseAaveV4Agent {
     address strategy,
     uint256[4] memory rates
   ) internal view returns (bool) {
-    (bool ok, uint256 bound) = _call1(
+    (bool ok, uint256 bound) = _staticcallWord(
       strategy,
       abi.encodeCall(IAssetInterestRateStrategy.MIN_OPTIMAL_RATIO, ())
     );
     if (!ok || rates[0] < bound || rates[0] == 0) return false;
 
-    (ok, bound) = _call1(
+    (ok, bound) = _staticcallWord(
       strategy,
       abi.encodeCall(IAssetInterestRateStrategy.MAX_OPTIMAL_RATIO, ())
     );
     if (!ok || rates[0] > bound) return false;
 
-    (ok, bound) = _call1(
+    (ok, bound) = _staticcallWord(
       strategy,
       abi.encodeCall(IAssetInterestRateStrategy.MAX_ALLOWED_DRAWN_RATE, ())
     );
     uint256 maxDrawnRate = rates[1] + rates[2] + rates[3];
     return ok && maxDrawnRate <= bound && maxDrawnRate <= type(uint32).max;
-  }
-
-  function _hubAllowsConfigurator(address hub) internal view returns (bool ok) {
-    uint256 authority;
-    (ok, authority) = _call1(hub, abi.encodeCall(IAccessManaged.authority, ()));
-    if (!ok || authority >> 160 != 0) return false;
-
-    bytes memory data = abi.encodeCall(
-      IAccessManager.canCall,
-      (CONFIGURATOR, hub, IHub.setInterestRateData.selector)
-    );
-    assembly ('memory-safe') {
-      ok := staticcall(gas(), authority, add(data, 0x20), mload(data), 0x00, 0x40)
-      ok := and(and(ok, eq(returndatasize(), 0x40)), and(eq(mload(0x00), 1), iszero(mload(0x20))))
-    }
-  }
-
-  function _call1(address target, bytes memory data) private view returns (bool ok, uint256 word) {
-    assembly ('memory-safe') {
-      ok := staticcall(gas(), target, add(data, 0x20), mload(data), 0x00, 0x20)
-      ok := and(ok, eq(returndatasize(), 0x20))
-      word := mul(mload(0x00), ok)
-    }
-  }
-
-  function _call4(
-    address target,
-    bytes memory data
-  ) private view returns (bool ok, uint256[4] memory words) {
-    assembly ('memory-safe') {
-      ok := staticcall(gas(), target, add(data, 0x20), mload(data), words, 0x80)
-      ok := and(ok, eq(returndatasize(), 0x80))
-    }
   }
 }

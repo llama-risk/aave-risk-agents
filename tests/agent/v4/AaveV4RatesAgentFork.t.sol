@@ -13,8 +13,6 @@ import {AaveV4ForkTestBase} from './AaveV4ForkTestBase.sol';
 interface IAccessManagerAdmin {
   function getRoleMember(uint64 roleId, uint256 index) external view returns (address);
 
-  function setTargetClosed(address target, bool closed) external;
-
   function setTargetFunctionRole(
     address target,
     bytes4[] calldata selectors,
@@ -229,9 +227,7 @@ contract AaveV4RatesAgent_EthereumForkTest is AaveV4ForkTestBase('RateStrategyUp
     data.baseDrawnRate += 25;
     _publish(PRIME_HUB, address(0), USDC, abi.encode(data));
 
-    IAccessManagerAdmin accessManager = IAccessManagerAdmin(AaveV4EthereumFork.ACCESS_MANAGER);
-    vm.prank(accessManager.getRoleMember(0, 0));
-    accessManager.setTargetClosed(PRIME_HUB, true);
+    _closeTarget(PRIME_HUB);
 
     (bool shouldRun, ) = _check();
     assertFalse(shouldRun);
