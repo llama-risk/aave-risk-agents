@@ -14,7 +14,8 @@ import {IACLManager, IBoundedRatioAdapter} from '../dependencies/IBoundedRatioAd
  * @author LlamaRisk
  * @notice Agent that sets the lower bound of bounded ratio adapters. The update market is the
  *         adapter and the update value is abi.encode(uint256 lowerBound, uint256 expiration).
- *         The lower bound moves within the range validation config from the stored lower bound.
+ *         The lower bound moves within the range validation config from the active lower bound,
+ *         or from the ratio when no lower bound is active or the active one is above the ratio.
  */
 contract BoundsAgent is BaseAgent {
   using Strings for string;
@@ -112,15 +113,17 @@ contract BoundsAgent is BaseAgent {
     if (!ok || lowerBound >= value) return false;
 
     uint256 storedLowerBound;
-    (ok, storedLowerBound, value) = _read(
+    uint256 storedExpiration;
+    (ok, storedLowerBound, storedExpiration) = _read(
       adapter,
       abi.encodeCall(IBoundedRatioAdapter.getLowerBound, ()),
       0x40
     );
+    uint256 ratio = _getRatio(adapter);
     if (
       !ok ||
-      (lowerBound == storedLowerBound && expiration == value) ||
-      lowerBound > _ratioLimit(adapter, storedLowerBound) ||
+      (lowerBound == storedLowerBound && expiration == storedExpiration) ||
+      lowerBound > (ratio == 0 ? storedLowerBound : ratio) ||
       !_isRiskOrPoolAdmin(adapter)
     ) {
       return false;
@@ -132,21 +135,31 @@ contract BoundsAgent is BaseAgent {
         agentId,
         adapter,
         IRangeValidationModule.RangeValidationInput({
-          from: storedLowerBound,
+          from: _stepFrom(ratio, storedLowerBound, storedExpiration),
           to: lowerBound,
           updateType: LOWER_BOUND_RANGE_TYPE
         })
       );
   }
 
-  /// @dev mirrors the adapter: without a valid ratio, the stored lower bound is the limit
-  function _ratioLimit(address adapter, uint256 storedLowerBound) internal view returns (uint256) {
+  /// @dev without a valid ratio the step starts at the stored lower bound, as the adapter limit does
+  function _stepFrom(
+    uint256 ratio,
+    uint256 storedLowerBound,
+    uint256 storedExpiration
+  ) internal view returns (uint256) {
+    if (ratio == 0) return storedLowerBound;
+    uint256 activeLowerBound = block.timestamp < storedExpiration ? storedLowerBound : 0;
+    return activeLowerBound == 0 || activeLowerBound > ratio ? ratio : activeLowerBound;
+  }
+
+  function _getRatio(address adapter) internal view returns (uint256) {
     (bool ok, uint256 ratio, ) = _read(
       adapter,
       abi.encodeCall(IBoundedRatioAdapter.getRatio, ()),
       0x20
     );
-    return ok && ratio != 0 && ratio >> 255 == 0 ? ratio : storedLowerBound;
+    return ok && ratio >> 255 == 0 ? ratio : 0;
   }
 
   function _isRiskOrPoolAdmin(address adapter) internal view returns (bool) {

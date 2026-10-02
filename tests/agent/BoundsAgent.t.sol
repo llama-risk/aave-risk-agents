@@ -282,29 +282,49 @@ contract BoundsAgent_Test is BaseAgentTest('RatioLowerBoundUpdate') {
     assertFalse(_validate((SEED_LOWER_BOUND * (100_00 - change)) / 100_00, expiration));
   }
 
-  function test_validate_firstLowerBoundNeedsAbsoluteRange() public {
+  function test_validate_firstLowerBoundStepsFromRatio() public {
     BoundedRatioAdapterMock adapter = _deployAdapter(_ratioProvider);
     _agentHub.addAllowedMarket(_agentId, address(adapter));
 
-    IRiskOracle.RiskParameterUpdate memory update = _update(
-      address(adapter),
-      abi.encode(1.1e18, block.timestamp + 1 days)
-    );
-    assertFalse(_agent.validate(_agentId, _agentContext, update));
+    bytes memory value = abi.encode(1.1e18, block.timestamp + 1 days);
+    assertTrue(_agent.validate(_agentId, _agentContext, _update(address(adapter), value)));
+    value = abi.encode(1.09e18, block.timestamp + 1 days);
+    assertFalse(_agent.validate(_agentId, _agentContext, _update(address(adapter), value)));
+  }
 
-    _rangeValidationModule.setRangeConfigByMarket(
-      address(_agentHub),
-      _agentId,
-      address(adapter),
-      'RatioLowerBound',
-      IRangeValidationModule.RangeConfig({
-        maxIncrease: 1.1e18,
-        maxDecrease: 5_00,
-        isIncreaseRelative: false,
-        isDecreaseRelative: true
-      })
-    );
-    assertTrue(_agent.validate(_agentId, _agentContext, update));
+  function test_injection_expiredLowerBoundFollowsRatioDrop() public {
+    _ratioProvider.setAnswer(0.9e18);
+    vm.warp(block.timestamp + 1 days);
+    assertEq(_adapter.getActiveLowerBound(), 0);
+
+    assertFalse(_validate(0.85e18, block.timestamp + 1 days));
+    _update(0.89e18, block.timestamp + 1 days);
+    assertTrue(_checkAndPerformAutomation(_agentId));
+    _assertLowerBound(0.89e18, block.timestamp + 1 days);
+  }
+
+  function test_injection_activeLowerBoundAboveRatioFollowsRatio() public {
+    _ratioProvider.setAnswer(0.8e18);
+    assertTrue(_adapter.isFloored());
+
+    assertFalse(_validate(0.75e18, block.timestamp + 1 days));
+    assertTrue(_validate(0.78e18, block.timestamp + 1 days));
+    _update(0.8e18, block.timestamp + 1 hours);
+    assertTrue(_checkAndPerformAutomation(_agentId));
+    _assertLowerBound(0.8e18, block.timestamp + 1 hours);
+    assertFalse(_adapter.isFloored());
+  }
+
+  function testFuzz_validate_ratioAcceptedWithoutLowerBoundBelowIt(
+    uint256 ratio,
+    bool expired
+  ) public {
+    ratio = bound(ratio, 1, RATIO);
+    if (!expired) ratio = bound(ratio, 1, SEED_LOWER_BOUND - 1);
+    _ratioProvider.setAnswer(int256(ratio));
+    if (expired) vm.warp(block.timestamp + 1 days);
+
+    assertTrue(_validate(ratio, block.timestamp + 1 hours));
   }
 
   function test_validate_agentWithoutRole() public {

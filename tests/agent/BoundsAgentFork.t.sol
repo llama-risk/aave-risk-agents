@@ -16,9 +16,18 @@ import {BoundsAgent} from '../../src/contracts/agent/BoundsAgent.sol';
 import {IBoundedRatioAdapter} from './mocks/IBoundedRatioAdapterG.sol';
 import {BoundedRatioAdapterMock} from './mocks/BoundsAgentMocks.sol';
 
+interface IAaveV4Oracle {
+  function setReserveSource(uint256 reserveId, address source) external;
+
+  function getReservePrice(uint256 reserveId) external view returns (uint256);
+}
+
 contract BoundsAgentFork_Test is Test {
   string internal constant UPDATE_TYPE = 'RatioLowerBoundUpdate';
   address internal constant RATIO_PROVIDER = ChainlinkBase.AAVE_SVR_WEETH__EETH_Exchange_Rate;
+  address internal constant V4_MAG7_SPOKE = 0x17905Db0e4A3514467539956c084180616AE7B8D;
+  IAaveV4Oracle internal constant V4_MAG7_SPOKE_ORACLE =
+    IAaveV4Oracle(0xaBaf048fD7675Ea34a84332371ffd5D55E322A47);
 
   AgentHub internal _agentHub;
   IRiskOracle internal _riskOracle;
@@ -167,6 +176,26 @@ contract BoundsAgentFork_Test is Test {
     assertTrue(_run());
     assertEq(_adapter.getBoundedRatio(), seededLowerBound);
     assertGt(AaveV3Base.ORACLE.getAssetPrice(AaveV3BaseAssets.weETH_UNDERLYING), 0);
+  }
+
+  function test_fork_restoresV4ReservePriceAfterRatioFailure() public {
+    vm.prank(V4_MAG7_SPOKE);
+    V4_MAG7_SPOKE_ORACLE.setReserveSource(0, address(_adapter));
+    assertGt(V4_MAG7_SPOKE_ORACLE.getReservePrice(0), 0);
+
+    (uint256 seededLowerBound, ) = _adapter.getLowerBound();
+    vm.warp(block.timestamp + 1 days);
+    vm.mockCallRevert(RATIO_PROVIDER, abi.encodeCall(IChainlinkAggregator.latestAnswer, ()), '');
+    vm.expectRevert();
+    V4_MAG7_SPOKE_ORACLE.getReservePrice(0);
+
+    _publish(seededLowerBound, block.timestamp + 1 days);
+    assertTrue(_run());
+    assertEq(
+      V4_MAG7_SPOKE_ORACLE.getReservePrice(0),
+      uint256(IChainlinkAggregator(address(_adapter)).latestAnswer())
+    );
+    assertGt(V4_MAG7_SPOKE_ORACLE.getReservePrice(0), 0);
   }
 
   function test_fork_lostRoleSkipsUpdate() public {
