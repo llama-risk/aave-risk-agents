@@ -5,6 +5,11 @@ import {ConfiguratorMock, SpokeMock} from './AaveV4Mocks.sol';
 
 contract PausableSpokeMock is SpokeMock {
   address public authority;
+  address public ORACLE;
+
+  function setOracle(address oracle) external {
+    ORACLE = oracle;
+  }
 
   function setAuthority(address authority_) external {
     authority = authority_;
@@ -49,8 +54,21 @@ contract B20TokenMock {
 
 contract BoundedPriceAdapterMock {
   bool public isBreached;
+  int256 public latestAnswer = 100e8;
+
+  function decimals() external pure returns (uint8) {
+    return 8;
+  }
 
   function setBreached(bool breached) external {
     isBreached = breached;
+  }
+}
+
+contract ReserveSourceOracleMock {
+  mapping(uint256 => address) public getReserveSource;
+
+  function setReserveSource(uint256 reserveId, address source) external {
+    getReserveSource[reserveId] = source;
   }
 }

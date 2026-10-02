@@ -11,7 +11,7 @@ import {BaseAaveV4Agent} from '../../../src/contracts/agent/v4/BaseAaveV4Agent.s
 import {ISpoke} from '../../../src/contracts/dependencies/v4/ISpoke.sol';
 import {ISpokeConfigurator} from '../../../src/contracts/dependencies/v4/ISpokeConfigurator.sol';
 import {HubMock, AccessManagerMock, RawReturnMock} from './mocks/AaveV4Mocks.sol';
-import {PausableSpokeMock, PauseSpokeConfiguratorMock, B20OracleRegistryMock, BoundedPriceAdapterMock} from './mocks/AaveV4PauseMocks.sol';
+import {PausableSpokeMock, PauseSpokeConfiguratorMock, B20OracleRegistryMock, BoundedPriceAdapterMock, ReserveSourceOracleMock} from './mocks/AaveV4PauseMocks.sol';
 
 contract AaveV4PauseAgent_Test is BaseAgentTest('ReservePause') {
   AccessManagerMock internal _accessManager;
@@ -19,6 +19,7 @@ contract AaveV4PauseAgent_Test is BaseAgentTest('ReservePause') {
   HubMock internal _hub;
   PausableSpokeMock internal _spoke;
   B20OracleRegistryMock internal _registry;
+  ReserveSourceOracleMock internal _oracle;
   AaveV4PauseAgent internal _pauseAgent;
 
   address internal constant ASSET = address(0xA55E7);
@@ -47,6 +48,8 @@ contract AaveV4PauseAgent_Test is BaseAgentTest('ReservePause') {
       0
     );
     _registry = new B20OracleRegistryMock();
+    _oracle = new ReserveSourceOracleMock();
+    _spoke.setOracle(address(_oracle));
 
     _hub.listAsset(ASSET, ASSET_ID);
     _hub.listAsset(OTHER_ASSET, OTHER_ASSET_ID);
@@ -224,7 +227,7 @@ contract AaveV4PauseAgent_Test is BaseAgentTest('ReservePause') {
     _pauseAgent.setIssuerPokeEnabled(address(_hub), address(_spoke), ASSET, true);
     _registry.setOraclePaused(ASSET, true);
     _pauseAgent.poke(address(_hub), address(_spoke), ASSET);
-    assertEq(_pauseAgent.lastPausedAt(_market), block.timestamp);
+    assertEq(_pauseAgent.updatesInvalidUntil(_market), block.timestamp);
 
     _spoke.setPaused(RESERVE_ID, false);
     assertFalse(_validate(_market, _payload(ASSET, abi.encode(uint256(1)))));
@@ -249,12 +252,12 @@ contract AaveV4PauseAgent_Test is BaseAgentTest('ReservePause') {
     assertFalse(_spoke.getReserveConfig(RESERVE_ID).paused);
   }
 
-  function test_inject_recordsLastPausedAt() public {
+  function test_inject_recordsUpdatesInvalidUntil() public {
     _publish(_market, _payload(ASSET, abi.encode(uint256(1))));
     vm.warp(block.timestamp + 1);
     assertTrue(_checkAndPerformAutomation(_agentId));
-    assertEq(_pauseAgent.lastPausedAt(_market), block.timestamp);
-    assertEq(_pauseAgent.lastPausedAt(_otherMarket), 0);
+    assertEq(_pauseAgent.updatesInvalidUntil(_market), block.timestamp);
+    assertEq(_pauseAgent.updatesInvalidUntil(_otherMarket), 0);
   }
 
   function test_setHubAgentId_repointsToNewRegistration() public {
@@ -457,76 +460,169 @@ contract AaveV4PauseAgent_Test is BaseAgentTest('ReservePause') {
     _pauseAgent.poke(address(_hub), address(_spoke), asset);
   }
 
-  function test_setPriceAdapter_ownerAndAdmin() public {
-    BoundedPriceAdapterMock adapter = new BoundedPriceAdapterMock();
+  function test_setAdapterPokeEnabled_ownerAndAdmin() public {
+    _oracle.setReserveSource(RESERVE_ID, address(new BoundedPriceAdapterMock()));
     vm.expectEmit(address(_pauseAgent));
-    emit AaveV4PauseAgent.PriceAdapterSet(
+    emit AaveV4PauseAgent.AdapterPokeEnabledSet(
       _market,
       address(_hub),
       address(_spoke),
       ASSET,
-      address(adapter)
+      true
     );
-    _pauseAgent.setPriceAdapter(address(_hub), address(_spoke), ASSET, address(adapter));
-    assertEq(_pauseAgent.priceAdapter(_market), address(adapter));
-    assertEq(_pauseAgent.priceAdapter(_otherMarket), address(0));
+    _pauseAgent.setAdapterPokeEnabled(address(_hub), address(_spoke), ASSET, true);
+    assertTrue(_pauseAgent.isAdapterPokeEnabled(_market));
+    assertFalse(_pauseAgent.isAdapterPokeEnabled(_otherMarket));
 
     vm.prank(_admin);
-    _pauseAgent.setPriceAdapter(address(_hub), address(_spoke), ASSET, address(0));
-    assertEq(_pauseAgent.priceAdapter(_market), address(0));
+    _pauseAgent.setAdapterPokeEnabled(address(_hub), address(_spoke), ASSET, false);
+    assertFalse(_pauseAgent.isAdapterPokeEnabled(_market));
   }
 
-  function test_setPriceAdapter_onlyOwnerOrAdmin(address caller) public {
+  function test_setAdapterPokeEnabled_onlyOwnerOrAdmin(address caller) public {
     vm.assume(caller != address(this) && caller != _admin);
-    address adapter = address(new BoundedPriceAdapterMock());
+    _oracle.setReserveSource(RESERVE_ID, address(new BoundedPriceAdapterMock()));
     vm.prank(caller);
     vm.expectRevert(
       abi.encodeWithSelector(AaveV4PauseAgent.OnlyAgentHubOwnerOrAgentAdmin.selector, caller)
     );
-    _pauseAgent.setPriceAdapter(address(_hub), address(_spoke), ASSET, adapter);
+    _pauseAgent.setAdapterPokeEnabled(address(_hub), address(_spoke), ASSET, true);
   }
 
-  function test_setPriceAdapter_revertsBeforeHubAgentId() public {
+  function test_setAdapterPokeEnabled_revertsBeforeHubAgentId() public {
     AaveV4PauseAgent agent = _newAgent(address(_registry));
-    address adapter = address(new BoundedPriceAdapterMock());
     vm.expectRevert(AaveV4PauseAgent.HubAgentIdNotSet.selector);
-    agent.setPriceAdapter(address(_hub), address(_spoke), ASSET, adapter);
+    agent.setAdapterPokeEnabled(address(_hub), address(_spoke), ASSET, true);
   }
 
-  function test_setPriceAdapter_revertsOnZeroMarket() public {
-    address adapter = address(new BoundedPriceAdapterMock());
+  function test_setAdapterPokeEnabled_revertsOnZeroMarket() public {
     vm.expectRevert(AaveV4PauseAgent.InvalidMarket.selector);
-    _pauseAgent.setPriceAdapter(address(_hub), address(0), ASSET, adapter);
+    _pauseAgent.setAdapterPokeEnabled(address(_hub), address(0), ASSET, true);
   }
 
-  function test_setPriceAdapter_revertsOnInvalidAdapter() public {
+  function test_setAdapterPokeEnabled_revertsForUnlistedReserve() public {
+    address asset = address(0xdead);
+    address market = _pauseAgent.marketId(address(_hub), address(_spoke), asset);
+    vm.expectRevert(abi.encodeWithSelector(AaveV4PauseAgent.ReserveNotListed.selector, market));
+    _pauseAgent.setAdapterPokeEnabled(address(_hub), address(_spoke), asset, true);
+  }
+
+  function test_setAdapterPokeEnabled_revertsOnInvalidSource() public {
+    vm.expectRevert(
+      abi.encodeWithSelector(AaveV4PauseAgent.InvalidPriceAdapter.selector, address(0))
+    );
+    _pauseAgent.setAdapterPokeEnabled(address(_hub), address(_spoke), ASSET, true);
+
     address eoa = makeAddr('eoa');
+    _oracle.setReserveSource(RESERVE_ID, eoa);
     vm.expectRevert(abi.encodeWithSelector(AaveV4PauseAgent.InvalidPriceAdapter.selector, eoa));
-    _pauseAgent.setPriceAdapter(address(_hub), address(_spoke), ASSET, eoa);
+    _pauseAgent.setAdapterPokeEnabled(address(_hub), address(_spoke), ASSET, true);
 
     RawReturnMock raw = new RawReturnMock();
-    raw.setReturn(abi.encode(uint256(2)), false);
-    vm.expectRevert(
-      abi.encodeWithSelector(AaveV4PauseAgent.InvalidPriceAdapter.selector, address(raw))
-    );
-    _pauseAgent.setPriceAdapter(address(_hub), address(_spoke), ASSET, address(raw));
+    _oracle.setReserveSource(RESERVE_ID, address(raw));
+    bytes[3] memory bad = [abi.encode(uint256(2)), abi.encode(true, true), abi.encode(false)];
+    for (uint256 i; i < bad.length; i++) {
+      raw.setReturn(bad[i], i == 2);
+      vm.expectRevert(
+        abi.encodeWithSelector(AaveV4PauseAgent.InvalidPriceAdapter.selector, address(raw))
+      );
+      _pauseAgent.setAdapterPokeEnabled(address(_hub), address(_spoke), ASSET, true);
+    }
 
-    raw.setReturn(abi.encode(true, true), false);
+    _spoke.setOracle(address(0));
+    _oracle.setReserveSource(RESERVE_ID, address(new BoundedPriceAdapterMock()));
     vm.expectRevert(
-      abi.encodeWithSelector(AaveV4PauseAgent.InvalidPriceAdapter.selector, address(raw))
+      abi.encodeWithSelector(AaveV4PauseAgent.InvalidPriceAdapter.selector, address(0))
     );
-    _pauseAgent.setPriceAdapter(address(_hub), address(_spoke), ASSET, address(raw));
+    _pauseAgent.setAdapterPokeEnabled(address(_hub), address(_spoke), ASSET, true);
+  }
 
-    raw.setReturn(abi.encode(false), true);
-    vm.expectRevert(
-      abi.encodeWithSelector(AaveV4PauseAgent.InvalidPriceAdapter.selector, address(raw))
+  function test_poke_readsLiveReserveSource() public {
+    BoundedPriceAdapterMock oldSource = new BoundedPriceAdapterMock();
+    BoundedPriceAdapterMock otherSource = new BoundedPriceAdapterMock();
+    _enableAdapterPoke(ASSET, address(oldSource));
+    _oracle.setReserveSource(OTHER_RESERVE_ID, address(otherSource));
+
+    otherSource.setBreached(true);
+    vm.expectRevert(abi.encodeWithSelector(AaveV4PauseAgent.PokeConditionNotMet.selector, _market));
+    _pauseAgent.poke(address(_hub), address(_spoke), ASSET);
+
+    BoundedPriceAdapterMock newSource = new BoundedPriceAdapterMock();
+    _oracle.setReserveSource(RESERVE_ID, address(newSource));
+    oldSource.setBreached(true);
+    vm.expectRevert(abi.encodeWithSelector(AaveV4PauseAgent.PokeConditionNotMet.selector, _market));
+    _pauseAgent.poke(address(_hub), address(_spoke), ASSET);
+
+    newSource.setBreached(true);
+    _pauseAgent.poke(address(_hub), address(_spoke), ASSET);
+    assertTrue(_spoke.getReserveConfig(RESERVE_ID).paused);
+  }
+
+  function test_poke_noAdapterTriggerWhenSourceHasNoBreachFlag() public {
+    _enableAdapterPoke(ASSET, address(new BoundedPriceAdapterMock()));
+    _oracle.setReserveSource(RESERVE_ID, makeAddr('plainFeed'));
+    vm.expectRevert(abi.encodeWithSelector(AaveV4PauseAgent.PokeConditionNotMet.selector, _market));
+    _pauseAgent.poke(address(_hub), address(_spoke), ASSET);
+
+    _spoke.setOracle(address(0));
+    vm.expectRevert(abi.encodeWithSelector(AaveV4PauseAgent.PokeConditionNotMet.selector, _market));
+    _pauseAgent.poke(address(_hub), address(_spoke), ASSET);
+  }
+
+  function test_invalidateUpdates_ownerAndAdmin() public {
+    vm.expectEmit(address(_pauseAgent));
+    emit AaveV4PauseAgent.UpdatesInvalidated(
+      _market,
+      address(_hub),
+      address(_spoke),
+      ASSET,
+      block.timestamp
     );
-    _pauseAgent.setPriceAdapter(address(_hub), address(_spoke), ASSET, address(raw));
+    _pauseAgent.invalidateUpdates(address(_hub), address(_spoke), ASSET);
+    assertEq(_pauseAgent.updatesInvalidUntil(_market), block.timestamp);
+    assertEq(_pauseAgent.updatesInvalidUntil(_otherMarket), 0);
+
+    vm.warp(block.timestamp + 1);
+    vm.prank(_admin);
+    _pauseAgent.invalidateUpdates(address(_hub), address(_spoke), ASSET);
+    assertEq(_pauseAgent.updatesInvalidUntil(_market), block.timestamp);
+  }
+
+  function test_invalidateUpdates_onlyOwnerOrAdmin(address caller) public {
+    vm.assume(caller != address(this) && caller != _admin);
+    vm.prank(caller);
+    vm.expectRevert(
+      abi.encodeWithSelector(AaveV4PauseAgent.OnlyAgentHubOwnerOrAgentAdmin.selector, caller)
+    );
+    _pauseAgent.invalidateUpdates(address(_hub), address(_spoke), ASSET);
+  }
+
+  function test_invalidateUpdates_revertsOnZeroMarket() public {
+    vm.expectRevert(AaveV4PauseAgent.InvalidMarket.selector);
+    _pauseAgent.invalidateUpdates(address(_hub), address(0), ASSET);
+  }
+
+  function test_execute_updatePublishedWhilePausedRepausesWithoutInvalidation() public {
+    _pauseWhilePublishing();
+    assertTrue(_checkAndPerformAutomation(_agentId));
+    assertTrue(_spoke.getReserveConfig(RESERVE_ID).paused);
+  }
+
+  function test_execute_invalidateUpdatesBlocksUpdatePublishedWhilePaused() public {
+    _pauseWhilePublishing();
+    _pauseAgent.invalidateUpdates(address(_hub), address(_spoke), ASSET);
+    assertFalse(_checkAndPerformAutomation(_agentId));
+    assertFalse(_spoke.getReserveConfig(RESERVE_ID).paused);
+
+    vm.warp(block.timestamp + 1);
+    _publish(_market, _payload(ASSET, abi.encode(uint256(1))));
+    assertTrue(_checkAndPerformAutomation(_agentId));
+    assertTrue(_spoke.getReserveConfig(RESERVE_ID).paused);
   }
 
   function test_poke_pausesOnAdapterBreach(address caller) public {
     BoundedPriceAdapterMock adapter = new BoundedPriceAdapterMock();
-    _pauseAgent.setPriceAdapter(address(_hub), address(_spoke), ASSET, address(adapter));
+    _enableAdapterPoke(ASSET, address(adapter));
 
     vm.expectRevert(abi.encodeWithSelector(AaveV4PauseAgent.PokeConditionNotMet.selector, _market));
     _pauseAgent.poke(address(_hub), address(_spoke), ASSET);
@@ -539,7 +635,7 @@ contract AaveV4PauseAgent_Test is BaseAgentTest('ReservePause') {
 
     assertTrue(_spoke.getReserveConfig(RESERVE_ID).paused);
     assertFalse(_spoke.getReserveConfig(OTHER_RESERVE_ID).paused);
-    assertEq(_pauseAgent.lastPausedAt(_market), block.timestamp);
+    assertEq(_pauseAgent.updatesInvalidUntil(_market), block.timestamp);
     assertFalse(_pauseAgent.isIssuerPokeEnabled(_market));
 
     vm.expectRevert(
@@ -550,12 +646,7 @@ contract AaveV4PauseAgent_Test is BaseAgentTest('ReservePause') {
 
   function test_poke_adapterIgnoresIssuerFlagWhenIssuerPokeDisabled() public {
     _registry.setOraclePaused(ASSET, true);
-    _pauseAgent.setPriceAdapter(
-      address(_hub),
-      address(_spoke),
-      ASSET,
-      address(new BoundedPriceAdapterMock())
-    );
+    _enableAdapterPoke(ASSET, address(new BoundedPriceAdapterMock()));
     vm.expectRevert(abi.encodeWithSelector(AaveV4PauseAgent.PokeConditionNotMet.selector, _market));
     _pauseAgent.poke(address(_hub), address(_spoke), ASSET);
   }
@@ -565,7 +656,7 @@ contract AaveV4PauseAgent_Test is BaseAgentTest('ReservePause') {
     adapter.setBreached(true);
     _registry.setOraclePaused(ASSET, true);
     _pauseAgent.setIssuerPokeEnabled(address(_hub), address(_spoke), ASSET, true);
-    _pauseAgent.setPriceAdapter(address(_hub), address(_spoke), ASSET, address(adapter));
+    _enableAdapterPoke(ASSET, address(adapter));
 
     vm.expectEmit(address(_pauseAgent));
     emit AaveV4PauseAgent.Poked(_market, RESERVE_ID, address(this), true, true);
@@ -577,7 +668,7 @@ contract AaveV4PauseAgent_Test is BaseAgentTest('ReservePause') {
     BoundedPriceAdapterMock adapter = new BoundedPriceAdapterMock();
     adapter.setBreached(true);
     _pauseAgent.setIssuerPokeEnabled(address(_hub), address(_spoke), OTHER_ASSET, true);
-    _pauseAgent.setPriceAdapter(address(_hub), address(_spoke), OTHER_ASSET, address(adapter));
+    _enableAdapterPoke(OTHER_ASSET, address(adapter));
 
     vm.expectEmit(address(_pauseAgent));
     emit AaveV4PauseAgent.Poked(_otherMarket, OTHER_RESERVE_ID, address(this), false, true);
@@ -588,7 +679,7 @@ contract AaveV4PauseAgent_Test is BaseAgentTest('ReservePause') {
   function test_poke_issuerFlagWhenAdapterFails() public {
     RawReturnMock raw = new RawReturnMock();
     raw.setReturn(abi.encode(false), false);
-    _pauseAgent.setPriceAdapter(address(_hub), address(_spoke), ASSET, address(raw));
+    _enableAdapterPoke(ASSET, address(raw));
     _pauseAgent.setIssuerPokeEnabled(address(_hub), address(_spoke), ASSET, true);
 
     raw.setReturn(abi.encode(true), true);
@@ -609,8 +700,8 @@ contract AaveV4PauseAgent_Test is BaseAgentTest('ReservePause') {
   function test_poke_adapterUnsetDisablesPoke() public {
     BoundedPriceAdapterMock adapter = new BoundedPriceAdapterMock();
     adapter.setBreached(true);
-    _pauseAgent.setPriceAdapter(address(_hub), address(_spoke), ASSET, address(adapter));
-    _pauseAgent.setPriceAdapter(address(_hub), address(_spoke), ASSET, address(0));
+    _enableAdapterPoke(ASSET, address(adapter));
+    _pauseAgent.setAdapterPokeEnabled(address(_hub), address(_spoke), ASSET, false);
 
     vm.expectRevert(abi.encodeWithSelector(AaveV4PauseAgent.PokeDisabled.selector, _market));
     _pauseAgent.poke(address(_hub), address(_spoke), ASSET);
@@ -619,7 +710,7 @@ contract AaveV4PauseAgent_Test is BaseAgentTest('ReservePause') {
   function test_poke_adapterBreachFollowsHubGating() public {
     BoundedPriceAdapterMock adapter = new BoundedPriceAdapterMock();
     adapter.setBreached(true);
-    _pauseAgent.setPriceAdapter(address(_hub), address(_spoke), ASSET, address(adapter));
+    _enableAdapterPoke(ASSET, address(adapter));
 
     _agentHub.addRestrictedMarket(_agentId, _market);
     vm.expectRevert(abi.encodeWithSelector(AaveV4PauseAgent.MarketNotAllowed.selector, _market));
@@ -636,7 +727,7 @@ contract AaveV4PauseAgent_Test is BaseAgentTest('ReservePause') {
   function test_poke_adapterBreachBlocksStaleUpdate() public {
     BoundedPriceAdapterMock adapter = new BoundedPriceAdapterMock();
     adapter.setBreached(true);
-    _pauseAgent.setPriceAdapter(address(_hub), address(_spoke), ASSET, address(adapter));
+    _enableAdapterPoke(ASSET, address(adapter));
     _pauseAgent.poke(address(_hub), address(_spoke), ASSET);
 
     _spoke.setPaused(RESERVE_ID, false);
@@ -666,6 +757,26 @@ contract AaveV4PauseAgent_Test is BaseAgentTest('ReservePause') {
     vm.expectRevert(abi.encodeWithSelector(AaveV4PauseAgent.ReserveNotListed.selector, _market));
     _pauseAgent.poke(address(_hub), address(_spoke), ASSET);
     assertFalse(_validate(_market, _payload(ASSET, abi.encode(uint256(1)))));
+  }
+
+  function _enableAdapterPoke(address asset, address source) internal {
+    _oracle.setReserveSource(asset == ASSET ? RESERVE_ID : OTHER_RESERVE_ID, source);
+    _pauseAgent.setAdapterPokeEnabled(address(_hub), address(_spoke), asset, true);
+  }
+
+  function _pauseWhilePublishing() internal {
+    BoundedPriceAdapterMock adapter = new BoundedPriceAdapterMock();
+    _enableAdapterPoke(ASSET, address(adapter));
+    adapter.setBreached(true);
+    _pauseAgent.poke(address(_hub), address(_spoke), ASSET);
+
+    vm.warp(block.timestamp + 1 hours);
+    _publish(_market, _payload(ASSET, abi.encode(uint256(1))));
+    assertFalse(_checkAndPerformAutomation(_agentId));
+
+    vm.warp(block.timestamp + 2 hours);
+    adapter.setBreached(false);
+    _spoke.setPaused(RESERVE_ID, false);
   }
 
   function _newAgent(address registry) internal returns (AaveV4PauseAgent) {

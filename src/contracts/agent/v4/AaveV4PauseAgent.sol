@@ -8,6 +8,7 @@ import {Ownable} from 'openzeppelin-contracts/contracts/access/Ownable.sol';
 import {BaseAaveV4Agent} from './BaseAaveV4Agent.sol';
 import {IBoundedPriceAdapter} from '../../dependencies/adapters/IBoundedPriceAdapter.sol';
 import {IB20OracleRegistry} from '../../dependencies/b20/IB20OracleRegistry.sol';
+import {IAaveOracle} from '../../dependencies/v4/IAaveOracle.sol';
 import {ISpoke} from '../../dependencies/v4/ISpoke.sol';
 import {ISpokeConfigurator} from '../../dependencies/v4/ISpokeConfigurator.sol';
 
@@ -17,9 +18,10 @@ import {ISpokeConfigurator} from '../../dependencies/v4/ISpokeConfigurator.sol';
  * @notice Pauses Aave v4 spoke reserves and never unpauses them. The update value is
  *         abi.encode(uint256(1)). Anyone can poke a market to pause its reserve while the
  *         issuer oracle registry reports the asset paused (if issuer poke is enabled for the
- *         market) or while the price adapter set for the market reports isBreached(). Poke
- *         follows the AgentHub market gating, and updates published before the agent's last
- *         pause of a market are invalid.
+ *         market) or while the reserve's oracle source reports isBreached() (if adapter poke is
+ *         enabled for the market). Poke follows the AgentHub market gating. Updates published at
+ *         or before the agent's last pause of a market, or before an admin invalidation, are
+ *         invalid.
  */
 contract AaveV4PauseAgent is BaseAaveV4Agent {
   IB20OracleRegistry public immutable ISSUER_REGISTRY;
@@ -27,8 +29,8 @@ contract AaveV4PauseAgent is BaseAaveV4Agent {
   uint256 public hubAgentId;
   bool public isHubAgentIdSet;
   mapping(address market => bool) public isIssuerPokeEnabled;
-  mapping(address market => address) public priceAdapter;
-  mapping(address market => uint256) public lastPausedAt;
+  mapping(address market => bool) public isAdapterPokeEnabled;
+  mapping(address market => uint256) public updatesInvalidUntil;
 
   event HubAgentIdSet(uint256 indexed agentId);
   event IssuerPokeEnabledSet(
@@ -38,12 +40,19 @@ contract AaveV4PauseAgent is BaseAaveV4Agent {
     address asset,
     bool enabled
   );
-  event PriceAdapterSet(
+  event AdapterPokeEnabledSet(
     address indexed market,
     address hub,
     address spoke,
     address asset,
-    address adapter
+    bool enabled
+  );
+  event UpdatesInvalidated(
+    address indexed market,
+    address hub,
+    address spoke,
+    address asset,
+    uint256 until
   );
   event Poked(
     address indexed market,
@@ -98,29 +107,42 @@ contract AaveV4PauseAgent is BaseAaveV4Agent {
     emit IssuerPokeEnabledSet(market, hub, spoke, asset, enabled);
   }
 
-  /// @notice Sets the price adapter whose isBreached() triggers poke for a market. Zero unsets it.
+  /// @notice Enables or disables the isBreached() trigger of poke for a market. Poke reads the
+  ///         live reserve source from the spoke oracle, so the trigger follows source changes.
   /// @dev Only the AgentHub owner or the agent admin can call it.
-  function setPriceAdapter(address hub, address spoke, address asset, address adapter) external {
+  function setAdapterPokeEnabled(address hub, address spoke, address asset, bool enabled) external {
     address market = _checkMarketAdmin(hub, spoke, asset);
-    if (adapter != address(0)) {
+    if (enabled) {
+      (bool listed, , uint256 reserveId) = _reserveId(hub, spoke, asset);
+      require(listed, ReserveNotListed(market));
+      address source = _reserveSource(spoke, reserveId);
       (bool ok, uint256 breached) = _staticcallWord(
-        adapter,
+        source,
         abi.encodeCall(IBoundedPriceAdapter.isBreached, ())
       );
-      require(ok && breached <= 1, InvalidPriceAdapter(adapter));
+      require(source != address(0) && ok && breached <= 1, InvalidPriceAdapter(source));
     }
 
-    priceAdapter[market] = adapter;
-    emit PriceAdapterSet(market, hub, spoke, asset, adapter);
+    isAdapterPokeEnabled[market] = enabled;
+    emit AdapterPokeEnabledSet(market, hub, spoke, asset, enabled);
+  }
+
+  /// @notice Invalidates every update of a market published up to now. Run it before an unpause
+  ///         so that updates published while the reserve was paused cannot pause it again.
+  /// @dev Only the AgentHub owner or the agent admin can call it.
+  function invalidateUpdates(address hub, address spoke, address asset) external {
+    address market = _checkMarketAdmin(hub, spoke, asset);
+    updatesInvalidUntil[market] = block.timestamp;
+    emit UpdatesInvalidated(market, hub, spoke, asset, block.timestamp);
   }
 
   /// @notice Pauses the reserve of (hub, spoke, asset) if the issuer registry reports the asset
-  ///         paused or the price adapter of the market reports a breach.
+  ///         paused or the reserve's oracle source reports a breach.
   function poke(address hub, address spoke, address asset) external {
     address market = marketId(hub, spoke, asset);
-    address adapter = priceAdapter[market];
+    bool adapterPokeEnabled = isAdapterPokeEnabled[market];
     bool issuerPokeEnabled = isIssuerPokeEnabled[market];
-    require(issuerPokeEnabled || adapter != address(0), PokeDisabled(market));
+    require(issuerPokeEnabled || adapterPokeEnabled, PokeDisabled(market));
     require(
       IAgentHub(AGENT_HUB).getAgentAddress(hubAgentId) == address(this) &&
         IAgentHub(AGENT_HUB).isAgentEnabled(hubAgentId),
@@ -135,10 +157,11 @@ contract AaveV4PauseAgent is BaseAaveV4Agent {
     require(!config.paused, ReserveAlreadyPaused(market));
 
     bool issuerPaused = issuerPokeEnabled && _isIssuerPaused(asset);
-    bool adapterBreached = adapter != address(0) && _isAdapterBreached(adapter);
+    bool adapterBreached = adapterPokeEnabled &&
+      _isAdapterBreached(_reserveSource(spoke, reserveId));
     require(issuerPaused || adapterBreached, PokeConditionNotMet(market));
 
-    lastPausedAt[market] = block.timestamp;
+    updatesInvalidUntil[market] = block.timestamp;
     ISpokeConfigurator(CONFIGURATOR).pauseReserve(spoke, reserveId);
     emit Poked(market, reserveId, msg.sender, issuerPaused, adapterBreached);
   }
@@ -155,7 +178,7 @@ contract AaveV4PauseAgent is BaseAaveV4Agent {
     bytes calldata value
   ) internal view override returns (bool) {
     (bool ok, uint256 pause) = _decodeUint(value, 1);
-    if (!ok || pause != 1 || update.timestamp <= lastPausedAt[update.market]) return false;
+    if (!ok || pause != 1 || update.timestamp <= updatesInvalidUntil[update.market]) return false;
     if (!_configuratorCanCall(market.spoke, ISpoke.updateReserveConfig.selector)) return false;
 
     (bool listed, , uint256 reserveId) = _reserveId(market.hub, market.spoke, market.asset);
@@ -174,7 +197,7 @@ contract AaveV4PauseAgent is BaseAaveV4Agent {
     bytes calldata
   ) internal override {
     (, , uint256 reserveId) = _reserveId(market.hub, market.spoke, market.asset);
-    lastPausedAt[update.market] = block.timestamp;
+    updatesInvalidUntil[update.market] = block.timestamp;
     ISpokeConfigurator(CONFIGURATOR).pauseReserve(market.spoke, reserveId);
   }
 
@@ -202,7 +225,20 @@ contract AaveV4PauseAgent is BaseAaveV4Agent {
     return ok && words[1] == 1;
   }
 
+  function _reserveSource(address spoke, uint256 reserveId) internal view returns (address) {
+    (bool ok, uint256 oracle) = _staticcallWord(spoke, abi.encodeCall(ISpoke.ORACLE, ()));
+    if (!ok || oracle == 0 || oracle > type(uint160).max) return address(0);
+    uint256 source;
+    (ok, source) = _staticcallWord(
+      address(uint160(oracle)),
+      abi.encodeCall(IAaveOracle.getReserveSource, (reserveId))
+    );
+    if (!ok || source > type(uint160).max) return address(0);
+    return address(uint160(source));
+  }
+
   function _isAdapterBreached(address adapter) internal view returns (bool) {
+    if (adapter == address(0)) return false;
     (bool ok, uint256 breached) = _staticcallWord(
       adapter,
       abi.encodeCall(IBoundedPriceAdapter.isBreached, ())
