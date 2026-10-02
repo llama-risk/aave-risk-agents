@@ -15,8 +15,9 @@ import {IACLManager, IBoundedRatioAdapter} from '../dependencies/IBoundedRatioAd
  * @notice Agent that sets the lower bound of bounded ratio adapters. The update market is the
  *         adapter and the update value is abi.encode(uint256 lowerBound, uint256 expiration).
  *         The lower bound must not exceed the adapter getLowerBoundLimit and moves within the range
- *         validation config from the active lower bound, or from the ratio when no lower bound is
- *         active or the active one is above the ratio.
+ *         validation config from the active lower bound, or from the ratio capped by the limit
+ *         when no lower bound is active or the active one is above it. While the ratio is invalid
+ *         it moves from the priced ratio and never above it.
  */
 contract BoundsAgent is BaseAgent {
   using Strings for string;
@@ -131,7 +132,8 @@ contract BoundsAgent is BaseAgent {
     ) {
       return false;
     }
-    value = _stepFrom(_getRatio(adapter), value, storedLowerBound, storedExpiration);
+    (ok, value) = _stepFrom(adapter, lowerBound, value, storedLowerBound, storedExpiration);
+    if (!ok) return false;
 
     return
       RANGE_VALIDATION_MODULE.validate(
@@ -146,16 +148,31 @@ contract BoundsAgent is BaseAgent {
       );
   }
 
-  /// @dev without a valid ratio the step starts at the stored lower bound, or the adapter limit if none is stored
+  /// @dev With a valid ratio the step starts at the ratio capped by the limit, or the active
+  /// lower bound if lower. Without one the lower bound must not exceed the priced ratio and the
+  /// step starts at the priced ratio capped by the limit. With no priced ratio it starts at the
+  /// stored lower bound, or the limit if none is stored.
   function _stepFrom(
-    uint256 ratio,
+    address adapter,
+    uint256 lowerBound,
     uint256 limit,
     uint256 storedLowerBound,
     uint256 storedExpiration
-  ) internal view returns (uint256) {
-    if (ratio == 0) return storedLowerBound == 0 ? limit : storedLowerBound;
+  ) internal view returns (bool, uint256) {
+    uint256 ratio = _getRatio(adapter);
+    if (ratio == 0) {
+      (bool ok, uint256 priced, ) = _read(
+        adapter,
+        abi.encodeCall(IBoundedRatioAdapter.getBoundedRatio, ()),
+        0x20
+      );
+      if (!ok) return (false, 0);
+      if (priced != 0) return (lowerBound <= priced, priced < limit ? priced : limit);
+      return (true, storedLowerBound == 0 ? limit : storedLowerBound);
+    }
+    if (ratio > limit) ratio = limit;
     uint256 activeLowerBound = block.timestamp < storedExpiration ? storedLowerBound : 0;
-    return activeLowerBound == 0 || activeLowerBound > ratio ? ratio : activeLowerBound;
+    return (true, activeLowerBound == 0 || activeLowerBound > ratio ? ratio : activeLowerBound);
   }
 
   function _getRatio(address adapter) internal view returns (uint256) {

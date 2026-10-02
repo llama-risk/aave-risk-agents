@@ -275,6 +275,51 @@ contract BoundsAgent_Test is BaseAgentTest('RatioLowerBoundUpdate') {
     assertEq(_adapter.latestAnswer(), int256(SEED_LOWER_BOUND / 1e10));
   }
 
+  function test_injection_invalidRatioNeverLiftsHeldPrice() public {
+    _adapter.setLowerBound(uint104(RATIO), uint48(block.timestamp + 1 days));
+    vm.warp(block.timestamp + 1 days);
+    _ratioProvider.setAnswer(0.9e18);
+    _adapter.recordRatio();
+    _ratioProvider.setReverts(true);
+    assertEq(_adapter.latestAnswer(), int256(uint256(0.9e18) / 1e10));
+
+    assertFalse(_validate(RATIO, block.timestamp + 1 days));
+    assertFalse(_validate(0.9e18 + 1, block.timestamp + 1 days));
+    assertFalse(_validate(0.85e18, block.timestamp + 1 days));
+    assertTrue(_validate(0.86e18, block.timestamp + 1 days));
+    _update(0.9e18, block.timestamp + 1 days);
+    assertTrue(_checkAndPerformAutomation(_agentId));
+    assertEq(_adapter.latestAnswer(), int256(uint256(0.9e18) / 1e10));
+  }
+
+  function test_validate_invalidRatioAdapterLimitAboveHeldPrice() public {
+    MockRatioProvider provider = new MockRatioProvider(0.9e18);
+    BoundedRatioAdapterLimitMock adapter = new BoundedRatioAdapterLimitMock(
+      _adapterParams(provider)
+    );
+    _agentHub.addAllowedMarket(_agentId, address(adapter));
+    adapter.setLowerBoundLimit(RATIO);
+    adapter.recordRatio();
+    provider.setReverts(true);
+    assertEq(adapter.latestAnswer(), int256(uint256(0.9e18) / 1e10));
+
+    bytes memory value = abi.encode(RATIO, block.timestamp + 1 days);
+    assertFalse(_agent.validate(_agentId, _agentContext, _update(address(adapter), value)));
+    value = abi.encode(0.9e18, block.timestamp + 1 days);
+    assertTrue(_agent.validate(_agentId, _agentContext, _update(address(adapter), value)));
+  }
+
+  function test_validate_cappedRatioStepsFromLimit() public {
+    vm.warp(block.timestamp + 1 days);
+    _ratioProvider.setAnswer(int256((RATIO * 130) / 100));
+    assertTrue(_adapter.isCapped());
+    uint256 limit = _adapter.getLowerBoundLimit();
+
+    assertTrue(_validate(limit, block.timestamp + 1 days));
+    assertTrue(_validate((limit * 96) / 100, block.timestamp + 1 days));
+    assertFalse(_validate((limit * 94) / 100, block.timestamp + 1 days));
+  }
+
   function test_validate_stepInRange(uint256 change) public {
     change = bound(change, 0, 5_00);
     uint256 expiration = block.timestamp + 1 days + 1;
