@@ -23,6 +23,7 @@ import {MiscBase} from 'aave-address-book/MiscBase.sol';
 import {AaveV3Base} from 'aave-address-book/AaveV3Base.sol';
 import {MiscAvalanche} from 'aave-address-book/MiscAvalanche.sol';
 import {AaveV3Avalanche} from 'aave-address-book/AaveV3Avalanche.sol';
+import {MiscMonad} from 'aave-address-book/MiscMonad.sol';
 import {AaveV3Monad} from 'aave-address-book/AaveV3Monad.sol';
 
 import {DeploySupplyCapAgent} from './AaveSupplyCapAgent.s.sol';
@@ -222,26 +223,19 @@ contract DeployLinea is LineaScript {
   }
 }
 
-// AGENT_HUB and RANGE_VALIDATION_MODULE are not in the pinned aave-address-book version yet.
-// Added in aave-dao/aave-address-book#1596 (deployed by aave-agent-hub scripts/Deploy.s.sol:DeployMonad).
-library MonadAgentHub {
-  address internal constant AGENT_HUB = 0xa1Cf1e3D3fC743c0fd0e38f631A843372b7169DB;
-  address internal constant RANGE_VALIDATION_MODULE = 0x863D5B3f24E6b84564432dd20606a82bB1C61dC5;
-}
-
 // make deploy-ledger contract=scripts/Deploy.s.sol:DeployMonad chain=monad
 contract DeployMonad is MonadScript {
   function run() external broadcast {
     DeployDiscountRateAgent.deploy(
-      MonadAgentHub.AGENT_HUB,
-      MonadAgentHub.RANGE_VALIDATION_MODULE,
+      MiscMonad.AGENT_HUB,
+      MiscMonad.RANGE_VALIDATION_MODULE,
       '',
       address(AaveV3Monad.POOL),
       address(AaveV3Monad.ORACLE)
     );
     DeployEModeAgent.deploy(
-      MonadAgentHub.AGENT_HUB,
-      MonadAgentHub.RANGE_VALIDATION_MODULE,
+      MiscMonad.AGENT_HUB,
+      MiscMonad.RANGE_VALIDATION_MODULE,
       '',
       address(AaveV3Monad.POOL)
     );
