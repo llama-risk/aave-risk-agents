@@ -222,8 +222,8 @@ contract DeployLinea is LineaScript {
   }
 }
 
-// AGENT_HUB and RANGE_VALIDATION_MODULE are not in aave-address-book yet.
-// Source: aave-agent-hub scripts/Deploy.s.sol:DeployMonad (CREATE2, check after deploy).
+// AGENT_HUB and RANGE_VALIDATION_MODULE are not in the pinned aave-address-book version yet.
+// Added in aave-dao/aave-address-book#1596 (deployed by aave-agent-hub scripts/Deploy.s.sol:DeployMonad).
 library MonadAgentHub {
   address internal constant AGENT_HUB = 0xa1Cf1e3D3fC743c0fd0e38f631A843372b7169DB;
   address internal constant RANGE_VALIDATION_MODULE = 0x863D5B3f24E6b84564432dd20606a82bB1C61dC5;
