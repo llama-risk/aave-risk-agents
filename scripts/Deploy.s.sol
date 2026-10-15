@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-import {EthereumScript, PolygonScript, BNBScript, GnosisScript, ArbitrumScript, OptimismScript, PlasmaScript, LineaScript, BaseScript, AvalancheScript} from 'solidity-utils/contracts/utils/ScriptUtils.sol';
+import {EthereumScript, PolygonScript, BNBScript, GnosisScript, ArbitrumScript, OptimismScript, PlasmaScript, LineaScript, BaseScript, AvalancheScript, XLayerScript} from 'solidity-utils/contracts/utils/ScriptUtils.sol';
 import {MiscEthereum} from 'aave-address-book/MiscEthereum.sol';
 import {AaveV3Ethereum} from 'aave-address-book/AaveV3Ethereum.sol';
 import {AaveV3EthereumLido} from 'aave-address-book/AaveV3EthereumLido.sol';
@@ -23,6 +23,8 @@ import {MiscBase} from 'aave-address-book/MiscBase.sol';
 import {AaveV3Base} from 'aave-address-book/AaveV3Base.sol';
 import {MiscAvalanche} from 'aave-address-book/MiscAvalanche.sol';
 import {AaveV3Avalanche} from 'aave-address-book/AaveV3Avalanche.sol';
+import {AaveV3XLayer} from 'aave-address-book/AaveV3XLayer.sol';
+import {GovernanceV3XLayer} from 'aave-address-book/GovernanceV3XLayer.sol';
 
 import {DeploySupplyCapAgent} from './AaveSupplyCapAgent.s.sol';
 import {DeployBorrowCapAgent} from './AaveBorrowCapAgent.s.sol';
@@ -217,6 +219,46 @@ contract DeployLinea is LineaScript {
       MiscLinea.RANGE_VALIDATION_MODULE,
       '',
       address(AaveV3Linea.POOL)
+    );
+  }
+}
+
+interface IOwnable {
+  function owner() external view returns (address);
+}
+
+// Deployed by aave-agent-hub DeployXLayer; MiscXLayer does not carry them yet.
+// Both stay zero until that broadcast, and DeployXLayer refuses to run while they are.
+library XLayerAgentHub {
+  address internal constant AGENT_HUB = address(0);
+  address internal constant RANGE_VALIDATION_MODULE = address(0);
+}
+
+// make deploy-ledger contract=scripts/Deploy.s.sol:DeployXLayer chain=xlayer
+contract DeployXLayer is XLayerScript {
+  function run() external broadcast {
+    require(XLayerAgentHub.AGENT_HUB.code.length != 0, 'DeployXLayer: AGENT_HUB has no code');
+    require(
+      XLayerAgentHub.RANGE_VALIDATION_MODULE.code.length != 0,
+      'DeployXLayer: RANGE_VALIDATION_MODULE has no code'
+    );
+    require(
+      IOwnable(XLayerAgentHub.AGENT_HUB).owner() == GovernanceV3XLayer.EXECUTOR_LVL_1,
+      'DeployXLayer: AGENT_HUB is not owned by the X Layer executor'
+    );
+
+    DeployDiscountRateAgent.deploy(
+      XLayerAgentHub.AGENT_HUB,
+      XLayerAgentHub.RANGE_VALIDATION_MODULE,
+      '',
+      address(AaveV3XLayer.POOL),
+      address(AaveV3XLayer.ORACLE)
+    );
+    DeployEModeAgent.deploy(
+      XLayerAgentHub.AGENT_HUB,
+      XLayerAgentHub.RANGE_VALIDATION_MODULE,
+      '',
+      address(AaveV3XLayer.POOL)
     );
   }
 }
