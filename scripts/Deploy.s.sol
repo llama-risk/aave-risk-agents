@@ -227,11 +227,10 @@ interface IOwnable {
   function owner() external view returns (address);
 }
 
-// Deployed by aave-agent-hub DeployXLayer; MiscXLayer does not carry them yet.
-// Both stay zero until that broadcast, and DeployXLayer refuses to run while they are.
+// Deployed and verified onchain by aave-agent-hub DeployXLayer; MiscXLayer does not carry them yet.
 library XLayerAgentHub {
-  address internal constant AGENT_HUB = address(0);
-  address internal constant RANGE_VALIDATION_MODULE = address(0);
+  address internal constant AGENT_HUB = 0x7532F38Be8AB746DD6c1B686A9aAED3400eD35a0;
+  address internal constant RANGE_VALIDATION_MODULE = 0x863D5B3f24E6b84564432dd20606a82bB1C61dC5;
 }
 
 // make deploy-ledger contract=scripts/Deploy.s.sol:DeployXLayer chain=xlayer
